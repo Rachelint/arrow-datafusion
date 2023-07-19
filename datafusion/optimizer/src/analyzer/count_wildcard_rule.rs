@@ -131,6 +131,8 @@ impl TreeNodeRewriter for CountWildcardRewriter {
     type N = Expr;
 
     fn mutate(&mut self, old_expr: Expr) -> Result<Expr> {
+        dbg!("I walk in CountWildcardRewriter");
+        
         let new_expr = match old_expr.clone() {
             Expr::Alias(Alias { expr, name, .. }) if name.contains(COUNT_STAR) => {
                 Expr::Alias(Alias::new(
