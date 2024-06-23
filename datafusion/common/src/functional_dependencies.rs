@@ -346,7 +346,7 @@ impl FunctionalDependencies {
             nullable,
             mode,
         } in &self.deps
-        {
+        {   
             let new_source_indices =
                 update_elements_with_matching_indices(source_indices, proj_indices);
             let new_target_indices = if *mode == Dependency::Single {

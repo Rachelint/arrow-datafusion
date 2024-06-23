@@ -2366,6 +2366,8 @@ impl TableScan {
             return plan_err!("table_name cannot be empty");
         }
         let schema = table_source.schema();
+        
+        // FunctionalDependencies 暂时看只是提取并记录主键之类的信息？应该是用于后续 optimize?
         let func_dependencies = FunctionalDependencies::new_from_constraints(
             table_source.constraints(),
             schema.fields.len(),
@@ -2392,7 +2394,7 @@ impl TableScan {
                 df_schema.with_functional_dependencies(func_dependencies)
             })?;
         let projected_schema = Arc::new(projected_schema);
-
+        
         Ok(Self {
             table_name,
             source: table_source,

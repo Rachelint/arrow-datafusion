@@ -70,10 +70,23 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             return not_impl_err!("SORT BY");
         }
 
-        // process `from` clause
+        // 从 `FROM` clause, 生成初始的 scan logical plan (没有 filter 和 projection)
+        // 
+        // TableScan:
+        //   - table_name
+        //   - source, 生成 physical scan 实际就是调 source 的 scan 方法
+        //   - projection, 相当于 table source schema(input schema) 到 output schema 的映射
+        //   - projected_schema, output schema
+        //   - filters, filters
+        //   - fetch, 估计跟 limit 和 offset 有关？
         let plan = self.plan_from_tables(select.from, planner_context)?;
         let empty_from = matches!(plan, LogicalPlan::EmptyRelation(_));
 
+        // 从 `WHERE` clause, 生成 filter logical plan
+        // 
+        // Filter:
+        //   - predicate, filter 的 Expr, 叶子 Expr 是 Column
+        //   - input, 子 plan, 此处是 scan
         // process `where` clause
         let base_plan = self.plan_selection(select.selection, plan, planner_context)?;
 
@@ -88,8 +101,13 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             planner_context,
         )?;
 
+        // 从 SELECT xxx clause, 生成 projection plan
+        // 
+        // 临时的, 后面会被丢弃，起到辅助作用的一个 plan，是不是能优化掉？
         // having and group by clause may reference aliases defined in select projection
         let projected_plan = self.project(base_plan.clone(), select_exprs.clone())?;
+        println!("##Logical plan after projection, plan:\n{:?}", projected_plan);
+        
         // Place the fields of the base plan at the front so that when there are references
         // with the same name, the fields of the base plan will be searched first.
         // See https://github.com/apache/datafusion/issues/9162
@@ -110,6 +128,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         // this alias map is resolved and looked up in both having exprs and group by exprs
         let alias_map = extract_aliases(&select_exprs);
 
+        // 从这段开始就是 aggr 的处理:
+        //   - 提取 aggr exprs(从 SELECT/HAVING)
+        //   - 提取 group by exprs
         // Optionally the HAVING expression.
         let having_expr_opt = select
             .having
@@ -136,7 +157,8 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 normalize_col(having_expr, &projected_plan)
             })
             .transpose()?;
-
+            
+        // 提取 aggr exprs(从 SELECT/HAVING)
         // The outer expressions we will search through for
         // aggregates. Aggregates may be sourced from the SELECT...
         let mut aggr_expr_haystack = select_exprs.clone();
@@ -148,8 +170,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         // All of the aggregate expressions (deduplicated).
         let aggr_exprs = find_aggregate_exprs(&aggr_expr_haystack);
 
+        // 提取 group by exprs
         // All of the group by expressions
         let group_by_exprs = if let GroupByExpr::Expressions(exprs) = select.group_by {
+            // 只要有 aggr, sqlparser 就会生成 group by, 如果确实没有 group by 的话，这里会是空
+            dbg!(&exprs);
             exprs
                 .into_iter()
                 .map(|e| {
@@ -178,6 +203,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         } else {
             // 'group by all' groups wrt. all select expressions except 'AggregateFunction's.
             // Filter and collect non-aggregate select expressions
+            dbg!(&select_exprs);
             select_exprs
                 .iter()
                 .filter(|select_expr| match select_expr {
@@ -190,12 +216,30 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 .cloned()
                 .collect()
         };
+        dbg!(&group_by_exprs);
 
+        // 根据 `SELECT` 和 `GROUP BY` clause 提取的 exprs, 生成 aggr logical plan
+        // 函数比较混乱，还包括对 having 的改的。。。我觉得分成两个函数会比较清晰？
         // process group by, aggregation or having
         let (plan, mut select_exprs_post_aggr, having_expr_post_aggr) = if !group_by_exprs
             .is_empty()
             || !aggr_exprs.is_empty()
-        {
+        {   
+            // 主要作用是生成 aggr logical plan
+            //
+            // ###里面会处理 group by 的特殊 case
+            // SELECT ts, sn, SUM(amount) as sum1
+            // FROM sales_global_with_pk
+            // GROUP BY sn
+            //
+            // 当这个 sn 是 uk 或者 pk 时，这个 sql 实际是合法的，会被修改成:
+            //
+            // SELECT ts, sn, SUM(amount) as sum1
+            // FROM sales_global_with_pk
+            // GROUP BY ts, sn
+            //
+            // ###里面会重写 having
+            // having 可能是以 function 的方式表示的，将其重写成 aggr 结果中的 col
             self.aggregate(
                 &base_plan,
                 &select_exprs,
@@ -209,7 +253,9 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
                 None => (base_plan.clone(), select_exprs.clone(), having_expr_opt)
             }
         };
+        println!("##Logical plan after aggr, plan:\n{:?}", plan);
 
+        // 根据从 `HAVING` clause 并改写过后的 having exprs, 生成对于 aggr 的 filter logical plan
         let plan = if let Some(having_expr_post_aggr) = having_expr_post_aggr {
             LogicalPlanBuilder::from(plan)
                 .filter(having_expr_post_aggr)?
@@ -235,8 +281,11 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
             plan
         };
 
+        // 根据 `SELECT` clause，生成最后的 projection logical plan
+        // 因为 aggr 的结果并不是全部都会输出的, 例如 select max(b1) group c1
         // try process unnest expression or do the final projection
         let plan = self.try_process_unnest(plan, select_exprs_post_aggr)?;
+        println!("##Logical plan after unnest, plan:\n{:?}", plan);        
 
         // process distinct clause
         let plan = match select.distinct {
@@ -287,6 +336,7 @@ impl<'a, S: ContextProvider> SqlToRel<'a, S> {
         };
 
         let plan = self.order_by(plan, order_by_rex)?;
+        println!("##Logical plan final, plan:\n{:?}", plan);
 
         Ok(plan)
     }
