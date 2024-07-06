@@ -1076,6 +1076,10 @@ where
 /// match the column in the parquet file to the column in the arrow schema.
 #[derive(Debug)]
 pub struct StatisticsConverter<'a> {
+    // Arrow schema 的顺序和 parquet schema 的顺序并不是一致的，
+    // 甚至 arrow schema 里的列，在 parquet file 中压根不存在，
+    // 所以在 try_new 的时候，需要从 parquet schema 中，
+    // 找到其中对应 arrow field（column）的 idx。
     /// the index of the matched column in the parquet schema
     parquet_index: Option<usize>,
     /// The field (with data type) of the column in the arrow schema
