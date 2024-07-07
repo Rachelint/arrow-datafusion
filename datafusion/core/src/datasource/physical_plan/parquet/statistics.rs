@@ -402,6 +402,7 @@ macro_rules! get_statistics {
                 let mode = std::env::var("MODE").unwrap_or_default();
                 match mode.as_str() {
                     "use_builder" => {
+                        println!("builder here");
                         let iterator = [<$stat_type_prefix ByteArrayStatsIterator>]::new($iterator);
                         let mut builder = StringBuilder::new();
                         for x in iterator {
