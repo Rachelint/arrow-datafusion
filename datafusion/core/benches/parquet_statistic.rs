@@ -215,10 +215,10 @@ fn criterion_benchmark(c: &mut Criterion) {
             let row_group_indices: Vec<_> = (0..row_groups.len()).collect();
 
             let statistic_type = if data_page_row_count_limit.is_some() {
-                "data page"
-            } else {
-                // "row group"
+                // "data page"
                 continue;
+            } else {
+                "row group"
             };
 
             let mut group = c.benchmark_group(format!(
