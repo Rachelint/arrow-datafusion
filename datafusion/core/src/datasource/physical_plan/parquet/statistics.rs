@@ -908,7 +908,7 @@ macro_rules! get_data_page_statistics {
                         },
                         "use_builder" => {
                             let mut builder = StringBuilder::new();
-                            let iterator = [<$stat_type_prefix ByteArrayDataPageStatsIterator>]::new($iterator).flatten();
+                            let iterator = [<$stat_type_prefix ByteArrayDataPageStatsIterator>]::new($iterator);
                             for x in iterator {
                                 for x in x.into_iter() {
                                     let Some(x) = x else {
