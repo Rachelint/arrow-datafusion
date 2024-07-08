@@ -787,48 +787,34 @@ macro_rules! get_data_page_statistics {
                             })
                             .flatten()
                 ))),
-                // Some(DataType::UInt64) => Ok(Arc::new(
-                //     UInt64Array::from_iter(
-                //         [<$stat_type_prefix Int64DataPageStatsIterator>]::new($iterator)
-                //             .map(|x| {
-                //                 x.into_iter().map(|x| {
-                //                     x.and_then(|x| Some(x as u64))
-                //                 })
-                //             })
-                //             .flatten()
-                // ))),
-
-                // Some(DataType::UInt64) => {
-                //     let iterator = [<$stat_type_prefix Int64DataPageStatsIterator>]::new($iterator)
-                //             .map(|x| {
-                //                 x.into_iter().map(|x| {
-                //                     x.and_then(|x| Some(x as u64))
-                //                 })
-                //             })
-                //             .flatten();
-                //     let mut builder = UInt64Builder::with_capacity(512);
-                //     // let mut builder = UInt64Builder::new();
-                //     for x in iterator {
-                //         let Some(x) = x else {
-                //             builder.append_null();
-                //             continue;
-                //         };
-                //         builder.append_value(x as u64);
-                //     }
-                //     Ok(Arc::new(builder.finish()))
-                // },
-
                 Some(DataType::UInt64) => {
-                    let iterator = [<$stat_type_prefix Int64DataPageStatsIterator>]::new($iterator)
+                    let mode = env::var("MODE").unwrap_or_default();
+                    match mode.as_str() {
+                        "use_builder" => {
+                            let iterator = [<$stat_type_prefix Int64DataPageStatsIterator>]::new($iterator)
                             .map(|x| {
                                 x.into_iter().map(|x| {
                                     x.and_then(|x| Some(x as u64))
                                 })
                             })
                             .flatten();
-                    let mut builder = UInt64Builder::with_capacity(512);
-                    builder.extend(iterator);
-                    Ok(Arc::new(builder.finish()))
+                            let mut builder = UInt64Builder::new();
+                            builder.extend(iterator);
+                            Ok(Arc::new(builder.finish()))
+                        },
+                        _ => {
+                            Ok(Arc::new(
+                                UInt64Array::from_iter(
+                                    [<$stat_type_prefix Int64DataPageStatsIterator>]::new($iterator)
+                                        .map(|x| {
+                                            x.into_iter().map(|x| {
+                                                x.and_then(|x| Some(x as u64))
+                                            })
+                                        })
+                                        .flatten()
+                            ))),
+                        }
+                    }
                 },
                 Some(DataType::Int8) => Ok(Arc::new(
                     Int8Array::from_iter(
@@ -895,13 +881,13 @@ macro_rules! get_data_page_statistics {
                                     builder.append_null(); // no statistics value
                                     continue;
                                 };
-    
+
                                 let Ok(x) = std::str::from_utf8(x.data()) else {
                                     log::debug!("Utf8 statistics is a non-UTF8 value, ignoring it.");
                                     builder.append_null();
                                     continue;
                                 };
-    
+
                                 builder.append_value(x);
                             }
                             Ok(Arc::new(builder.finish()))
@@ -915,13 +901,13 @@ macro_rules! get_data_page_statistics {
                                         builder.append_null(); // no statistics value
                                         continue;
                                     };
-        
+
                                     let Ok(x) = std::str::from_utf8(x.data()) else {
                                         log::debug!("Utf8 statistics is a non-UTF8 value, ignoring it.");
                                         builder.append_null();
                                         continue;
                                     };
-        
+
                                     builder.append_value(x);
                                 }
                             }
@@ -1315,7 +1301,6 @@ where
 //         _ => unimplemented!(),
 //     }
 // }
-
 
 /// Extracts the null count statistics from an iterator
 /// of parquet page [`Index`]'es to an [`ArrayRef`]
