@@ -754,7 +754,21 @@ macro_rules! get_data_page_statistics {
                             let mut builder = BooleanBuilder::new();
                             builder.extend(iterator);
                             Ok(Arc::new(builder.finish()))
-                        }
+                        },
+                        "use_builder_v2" => {
+                            let iterator = [<$stat_type_prefix BooleanDataPageStatsIterator>]::new($iterator);
+                            let mut builder = BooleanBuilder::new();
+                            for x in iterator {
+                                for x in x.into_iter() {
+                                    let Some(x) = x else {
+                                        builder.append_null(); // no statistics value
+                                        continue;
+                                    };
+                                    builder.append_value(x);
+                                }
+                            }
+                            Ok(Arc::new(builder.finish()))
+                        },
                         _ => {
                             Ok(Arc::new(
                                 BooleanArray::from_iter(
