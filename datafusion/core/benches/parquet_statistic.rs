@@ -84,9 +84,11 @@ fn create_parquet_file(
             DataType::Dictionary(Box::new(Int32), Box::new(Utf8)),
             true,
         )])),
-        TestTypes::Boolean => {
-            Arc::new(Schema::new(vec![Field::new("col", DataType::Boolean, true)]))
-        }
+        TestTypes::Boolean => Arc::new(Schema::new(vec![Field::new(
+            "col",
+            DataType::Boolean,
+            true,
+        )])),
     };
 
     let mut props = WriterProperties::builder().set_max_row_group_size(row_groups);
@@ -202,7 +204,8 @@ fn make_dict_batch() -> RecordBatch {
 }
 
 fn make_bool_batch() -> RecordBatch {
-    let array: ArrayRef =  Arc::new(BooleanArray::from(vec![true, false, true, false, true]));
+    let array: ArrayRef =
+        Arc::new(BooleanArray::from(vec![true, false, true, false, true]));
     RecordBatch::try_new(
         Arc::new(arrow::datatypes::Schema::new(vec![
             arrow::datatypes::Field::new("col", Boolean, false),
