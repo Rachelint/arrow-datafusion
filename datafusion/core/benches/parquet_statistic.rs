@@ -18,7 +18,7 @@
 //! Benchmarks of benchmark for extracting arrow statistics from parquet
 
 use arrow::array::{ArrayRef, DictionaryArray, Float64Array, StringArray, UInt64Array};
-use arrow_array::{Int32Array, Int64Array, RecordBatch};
+use arrow_array::{BooleanArray, Int32Array, Int64Array, RecordBatch};
 use arrow_schema::{
     DataType::{self, *},
     Field, Schema,
@@ -41,6 +41,7 @@ enum TestTypes {
     F64,
     String,
     Dictionary,
+    Boolean,
 }
 
 use std::fmt;
@@ -53,6 +54,7 @@ impl fmt::Display for TestTypes {
             TestTypes::F64 => write!(f, "F64"),
             TestTypes::String => write!(f, "String"),
             TestTypes::Dictionary => write!(f, "Dictionary(Int32, String)"),
+            TestTypes::Boolean => write!(f, "Boolean"),
         }
     }
 }
@@ -82,6 +84,9 @@ fn create_parquet_file(
             DataType::Dictionary(Box::new(Int32), Box::new(Utf8)),
             true,
         )])),
+        TestTypes::Boolean => {
+            Arc::new(Schema::new(vec![Field::new("col", DataType::Boolean, true)]))
+        }
     };
 
     let mut props = WriterProperties::builder().set_max_row_group_size(row_groups);
@@ -107,6 +112,7 @@ fn create_parquet_file(
             TestTypes::F64 => make_f64_batch(),
             TestTypes::String => make_string_batch(),
             TestTypes::Dictionary => make_dict_batch(),
+            TestTypes::Boolean => make_bool_batch(),
         };
         if data_page_row_count_limit.is_some() {
             // Send batches one at a time. This allows the
@@ -195,12 +201,23 @@ fn make_dict_batch() -> RecordBatch {
     .unwrap()
 }
 
+fn make_bool_batch() -> RecordBatch {
+    let array: ArrayRef =  Arc::new(BooleanArray::from(vec![true, false, true, false, true]));
+    RecordBatch::try_new(
+        Arc::new(arrow::datatypes::Schema::new(vec![
+            arrow::datatypes::Field::new("col", Boolean, false),
+        ])),
+        vec![array],
+    )
+    .unwrap()
+}
+
 fn criterion_benchmark(c: &mut Criterion) {
     let row_groups = 100;
     use TestTypes::*;
     // let types = vec![Int64, UInt64, F64, String, Dictionary];
     // let types = vec![String];
-    let types = vec![String];
+    let types = vec![UInt64, String, Boolean];
     let data_page_row_count_limits = vec![None, Some(1)];
 
     for dtype in types {

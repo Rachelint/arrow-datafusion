@@ -19,7 +19,7 @@
 
 // TODO: potentially move this to arrow-rs: https://github.com/apache/arrow-rs/issues/4328
 
-use arrow::array::{StringBuilder, UInt64Builder};
+use arrow::array::{BooleanBuilder, StringBuilder, UInt64Builder};
 use arrow::datatypes::i256;
 use arrow::{array::ArrayRef, datatypes::DataType};
 use arrow_array::{
@@ -746,15 +746,28 @@ macro_rules! get_data_page_statistics {
     ($stat_type_prefix: ident, $data_type: ident, $iterator: ident) => {
         paste! {
             match $data_type {
-                Some(DataType::Boolean) => Ok(Arc::new(
-                    BooleanArray::from_iter(
-                        [<$stat_type_prefix BooleanDataPageStatsIterator>]::new($iterator)
-                            .flatten()
-                            // BooleanArray::from_iter required a sized iterator, so collect into Vec first
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                    )
-                )),
+                Some(DataType::Boolean) => {
+                    let mode = env::var("MODE").unwrap_or_default();
+                    match mode.as_str() {
+                        "use_builder" => {
+                            let iterator = [<$stat_type_prefix BooleanDataPageStatsIterator>]::new($iterator).flatten();
+                            let mut builder = BooleanBuilder::new();
+                            builder.extend(iterator);
+                            Ok(Arc::new(builder.finish()))
+                        }
+                        _ => {
+                            Ok(Arc::new(
+                                BooleanArray::from_iter(
+                                    [<$stat_type_prefix BooleanDataPageStatsIterator>]::new($iterator)
+                                        .flatten()
+                                        // BooleanArray::from_iter required a sized iterator, so collect into Vec first
+                                        .collect::<Vec<_>>()
+                                        .into_iter()
+                                )
+                            ))
+                        }
+                    }
+                },
                 Some(DataType::UInt8) => Ok(Arc::new(
                     UInt8Array::from_iter(
                         [<$stat_type_prefix Int32DataPageStatsIterator>]::new($iterator)
@@ -812,7 +825,7 @@ macro_rules! get_data_page_statistics {
                                             })
                                         })
                                         .flatten()
-                            ))),
+                            )))
                         }
                     }
                 },
@@ -1086,7 +1099,6 @@ pub(crate) fn max_page_statistics<'a, I>(
 where
     I: Iterator<Item = (usize, &'a Index)>,
 {
-    let mode = env::var("MODE").unwrap_or_default();
     get_data_page_statistics!(Max, data_type, iterator)
 }
 
@@ -1100,12 +1112,6 @@ where
 //     I: Iterator<Item = (usize, &'a Index)>,
 // {
 //     match data_type {
-//         Some(DataType::Boolean) => Ok(Arc::new(BooleanArray::from_iter(
-//             MaxBooleanDataPageStatsIterator::new(iterator)
-//                 .flatten()
-//                 .collect::<Vec<_>>()
-//                 .into_iter(),
-//         ))),
 //         Some(DataType::UInt8) => Ok(Arc::new(UInt8Array::from_iter(
 //             MaxInt32DataPageStatsIterator::new(iterator)
 //                 .map(|x| {
@@ -1135,7 +1141,6 @@ where
 //         Some(DataType::UInt64) => {
 //             let mut builder = UInt64Builder::new();
 //             let iterator = MaxInt64DataPageStatsIterator::new(iterator);
-//             builder.extend(iterator);
 //             for x in iterator {
 //                 for x in x.into_iter() {
 //                     let Some(x) = x else {
