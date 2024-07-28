@@ -1,0 +1,47 @@
+{
+  "queries": [
+    {
+      "iterations": [
+        {
+          "elapsed": 13877.158452,
+          "row_count": 10
+        },
+        {
+          "elapsed": 15819.377913,
+          "row_count": 10
+        },
+        {
+          "elapsed": 14248.625843,
+          "row_count": 10
+        },
+        {
+          "elapsed": 15209.230098,
+          "row_count": 10
+        },
+        {
+          "elapsed": 14272.598607000002,
+          "row_count": 10
+        }
+      ],
+      "query": "Query 0",
+      "start_time": 1722161685
+    }
+  ],
+  "context": {
+    "arguments": [
+      "clickbench",
+      "--iterations",
+      "5",
+      "--path",
+      "./benchmarks/data/hits.parquet",
+      "--queries-path",
+      "./benchmarks/queries/clickbench/queries.sql",
+      "-o",
+      "./result"
+    ],
+    "benchmark_version": "40.0.0",
+    "datafusion_version": "40.0.0",
+    "num_cpus": 6,
+    "start_time": 1722161685
+  }
+}

@@ -134,7 +134,8 @@ url = "2.2"
 
 [profile.release]
 codegen-units = 1
-lto = true
+#lto = true
+debug = true
 
 # the release profile takes a long time to build so we can use this profile during development to save time
 # cargo build --profile release-nonlto
