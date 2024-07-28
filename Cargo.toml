@@ -66,22 +66,22 @@ ahash = { version = "0.8", default-features = false, features = [
     "runtime-rng",
 ] }
 
-arrow = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda", features = [
+arrow = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72", features = [
     "prettyprint",
 ] }
-arrow-array = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  default-features = false, features = [
+arrow-array = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  default-features = false, features = [
     "chrono-tz",
 ] }
-arrow-buffer = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  default-features = false }
-arrow-flight = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  features = [
+arrow-buffer = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  default-features = false }
+arrow-flight = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  features = [
     "flight-sql-experimental",
 ] }
-arrow-ipc = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  default-features = false, features = [
+arrow-ipc = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  default-features = false, features = [
     "lz4",
 ] }
-arrow-ord = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  default-features = false }
-arrow-schema = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  default-features = false }
-arrow-string = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda",  default-features = false }
+arrow-ord = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  default-features = false }
+arrow-schema = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  default-features = false }
+arrow-string = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72",  default-features = false }
 async-trait = "0.1.73"
 bigdecimal = "=0.4.1"
 bytes = "1.4"
@@ -117,7 +117,7 @@ log = "^0.4"
 num_cpus = "1.13.0"
 object_store = { version = "0.10.1", default-features = false }
 parking_lot = "0.12"
-parquet = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "419ce7810cf5789b6c84ca210c9d4e3faf6f3eda", default-features = false, features = [
+parquet = { git = "https://github.com/Rachelint/arrow-rs.git", rev = "2053bd0764da9f5aaa1a83354a60e164a5d74b72", default-features = false, features = [
     "arrow",
     "async",
     "object_store",
