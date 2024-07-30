@@ -44,7 +44,7 @@ pub struct GroupValuesRows {
     ///
     /// keys: u64 hashes of the GroupValue
     /// values: (hash, group_index)
-    map: RawTable<(u64, usize)>,
+    map: RawTable<(u64, (u16, u32))>,
 
     /// The size of `map` in bytes
     map_size: usize,
@@ -121,16 +121,17 @@ impl GroupValues for GroupValuesRows {
         create_hashes(cols, &self.random_state, batch_hashes)?;
 
         for (row, &target_hash) in batch_hashes.iter().enumerate() {
-            let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
+            let entry = self.map.get_mut(target_hash, |(_hash, (exist_salt, group_idx))| {
                 // verify that a group that we are inserting with hash is
                 // actually the same key value as the group in
                 // existing_idx  (aka group_values @ row)
-                target_hash == *exist_hash && group_rows.row(row) == group_values.row(*group_idx)
+                let target_salt = (target_hash >> 48) as u16;
+                target_salt == *exist_salt && group_rows.row(row) == group_values.row(*group_idx as usize)
             });
 
             let group_idx = match entry {
                 // Existing group_index for this group value
-                Some((_hash, group_idx)) => *group_idx,
+                Some((_hash, (_salt, group_idx))) => *group_idx as usize,
                 //  1.2 Need to create new entry for the group
                 None => {
                     // Add new entry to aggr_state and save newly created index
@@ -138,8 +139,9 @@ impl GroupValues for GroupValuesRows {
                     group_values.push(group_rows.row(row));
 
                     // for hasher function, use precomputed hash value
+                    let target_salt = (target_hash >> 48) as u16;
                     self.map.insert_accounted(
-                        (target_hash, group_idx),
+                        (target_hash, (target_salt, group_idx as u32)),
                         |(hash, _group_index)| *hash,
                         &mut self.map_size,
                     );
@@ -201,9 +203,10 @@ impl GroupValues for GroupValuesRows {
                 unsafe {
                     for bucket in self.map.iter() {
                         // Decrement group index by n
-                        match bucket.as_ref().1.checked_sub(n) {
+                        let group_idx = bucket.as_ref().1.1 as usize;
+                        match group_idx.checked_sub(n) {
                             // Group index was >= n, shift value down
-                            Some(sub) => bucket.as_mut().1 = sub,
+                            Some(sub) => bucket.as_mut().1.1 = sub as u32,
                             // Group index was < n, so remove from table
                             None => self.map.erase(bucket),
                         }
