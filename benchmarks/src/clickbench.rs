@@ -127,7 +127,7 @@ impl RunOpt {
         self.register_hits(&ctx).await?;
 
         let iterations = self.common.iterations;
-        let mut benchmark_run = BenchmarkRun::new();
+        let mut benchmark_run = BenchmarkRun::new(iterations);
         for query_id in query_range {
             benchmark_run.start_new_case(&format!("Query {query_id}"));
             let sql = queries.get_query(query_id)?;
@@ -137,14 +137,13 @@ impl RunOpt {
                 let start = Instant::now();
                 let results = ctx.sql(sql).await?.collect().await?;
                 let elapsed = start.elapsed();
-                let ms = elapsed.as_secs_f64() * 1000.0;
                 let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
-                println!(
-                    "Query {query_id} iteration {i} took {ms:.1} ms and returned {row_count} rows"
-                );
                 benchmark_run.write_iter(elapsed, row_count);
             }
+
+            benchmark_run.report_latest();
         }
+
         benchmark_run.maybe_write_json(self.output_path.as_ref())?;
         Ok(())
     }
