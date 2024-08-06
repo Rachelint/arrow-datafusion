@@ -130,7 +130,7 @@ impl BenchmarkRun {
     pub fn start_new_case(&mut self, id: &str) {
         self.queries.push(BenchQuery {
             query: id.to_owned(),
-            iterations: Vec::with_capacity(iterations),
+            iterations: Vec::with_capacity(self.iterations),
             start_time: SystemTime::now(),
         });
         if let Some(c) = self.current_case.as_mut() {
