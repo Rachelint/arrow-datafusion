@@ -135,7 +135,7 @@ impl RunOpt {
 
             for i in 0..iterations {
                 let start = Instant::now();
-                let results = ctx.sql(sql).await?.collect().await?;
+                ctx.sql(sql).await?.show().await?;
                 let elapsed = start.elapsed();
                 let row_count: usize = results.iter().map(|b| b.num_rows()).sum();
                 benchmark_run.write_iter(elapsed, row_count);
