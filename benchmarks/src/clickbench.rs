@@ -127,7 +127,7 @@ impl RunOpt {
         self.register_hits(&ctx).await?;
 
         let iterations = self.common.iterations;
-        let mut benchmark_run = BenchmarkRun::new(iterations);
+        let mut benchmark_run = BenchmarkRun::new_with_iterations(iterations);
         for query_id in query_range {
             benchmark_run.start_new_case(&format!("Query {query_id}"));
             let sql = queries.get_query(query_id)?;
