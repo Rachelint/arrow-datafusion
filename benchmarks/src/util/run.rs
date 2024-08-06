@@ -110,7 +110,7 @@ impl BenchmarkRun {
     pub fn new() -> Self {
         Self {
             context: RunContext::new(),
-            queries: Vec::with_capacity(iterations),
+            queries: Vec::new(),
             current_case: None,
             iterations: 0,
         }
