@@ -78,11 +78,10 @@ pub struct PartitionedFile {
     ///
     /// DataFusion relies on these statistics for planning (in particular to sort file groups),
     /// so if they are incorrect, incorrect answers may result.
-    pub statistics: Option<Arc<Statistics>>,
+    pub statistics: Option<Statistics>,
     /// An optional field for user defined per object metadata
     pub extensions: Option<Arc<dyn std::any::Any + Send + Sync>>,
 }
-
 impl PartitionedFile {
     /// Create a simple file without metadata or partition
     pub fn new(path: impl Into<String>, size: u64) -> Self {
