@@ -101,20 +101,31 @@ pub struct BenchmarkRun {
 
 impl Default for BenchmarkRun {
     fn default() -> Self {
-        Self::new(0)
+        Self::new()
     }
 }
 
 impl BenchmarkRun {
     // create new
-    pub fn new(iterations: usize) -> Self {
+    pub fn new() -> Self {
         Self {
             context: RunContext::new(),
             queries: Vec::with_capacity(iterations),
             current_case: None,
-            iterations: usize,
+            iterations: 0,
         }
     }
+
+    // create new
+    pub fn new_with_iterations(iterations: usize) -> Self {
+        Self {
+            context: RunContext::new(),
+            queries: Vec::with_capacity(iterations),
+            current_case: None,
+            iterations,
+        }
+    }
+
     /// begin a new case. iterations added after this will be included in the new case
     pub fn start_new_case(&mut self, id: &str) {
         self.queries.push(BenchQuery {
@@ -154,14 +165,6 @@ impl BenchmarkRun {
                 latest.query,
                 one_iter.row_count
             );
-        }
-
-        if let Some(idx) = self.current_case {
-            self.queries[idx]
-                .iterations
-                .push(QueryIter { elapsed, row_count })
-        } else {
-            panic!("no cases existed yet");
         }
     }
 
