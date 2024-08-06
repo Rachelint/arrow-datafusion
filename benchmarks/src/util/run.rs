@@ -96,28 +96,30 @@ pub struct BenchmarkRun {
     context: RunContext,
     queries: Vec<BenchQuery>,
     current_case: Option<usize>,
+    iterations: usize,
 }
 
 impl Default for BenchmarkRun {
     fn default() -> Self {
-        Self::new()
+        Self::new(0)
     }
 }
 
 impl BenchmarkRun {
     // create new
-    pub fn new() -> Self {
+    pub fn new(iterations: usize) -> Self {
         Self {
             context: RunContext::new(),
-            queries: vec![],
+            queries: Vec::with_capacity(iterations),
             current_case: None,
+            iterations: usize,
         }
     }
     /// begin a new case. iterations added after this will be included in the new case
     pub fn start_new_case(&mut self, id: &str) {
         self.queries.push(BenchQuery {
             query: id.to_owned(),
-            iterations: vec![],
+            iterations: Vec::with_capacity(iterations),
             start_time: SystemTime::now(),
         });
         if let Some(c) = self.current_case.as_mut() {
@@ -126,8 +128,34 @@ impl BenchmarkRun {
             self.current_case = Some(0);
         }
     }
+
     /// Write a new iteration to the current case
     pub fn write_iter(&mut self, elapsed: Duration, row_count: usize) {
+        if let Some(idx) = self.current_case {
+            self.queries[idx]
+                .iterations
+                .push(QueryIter { elapsed, row_count })
+        } else {
+            panic!("no cases existed yet");
+        }
+    }
+
+    /// Write a new iteration to the current case
+    pub fn report_latest(&self) {
+        if self.queries.is_empty() {
+            return;
+        }
+   
+        let latest = self.queries.last().unwrap();
+        for (round, one_iter) in latest.iterations.iter().enumerate() {
+            let ms =  one_iter.elapsed.as_secs_f64() * 1000.0;
+            println!(
+                "Query {} iteration {round} took {ms:.1} ms and returned {} rows",
+                latest.query,
+                one_iter.row_count
+            );
+        }
+
         if let Some(idx) = self.current_case {
             self.queries[idx]
                 .iterations
