@@ -152,9 +152,10 @@ impl GroupValues for GroupValuesRows {
             }
 
             for (part_idx, partition) in self.indexes_buffer.iter().enumerate() {
+                let part = self.map.get_partitions(part_idx);
                 for &row in partition.iter() {
                     let target_hash = batch_hashes[row];
-                    let entry = self.map.get_mut(part_idx, target_hash, |(exist_hash, group_idx)| {
+                    let entry = part.get_mut(target_hash, |(exist_hash, group_idx)| {
                         // Somewhat surprisingly, this closure can be called even if the
                         // hash doesn't match, so check the hash first with an integer
                         // comparison first avoid the more expensive comparison with
@@ -176,7 +177,7 @@ impl GroupValues for GroupValuesRows {
                             group_values.push(group_rows.row(row));
     
                             // for hasher function, use precomputed hash value
-                            self.map.insert_accounted(
+                            part.insert_accounted(
                                 part_idx,
                                 (target_hash, group_idx),
                                 |(hash, _group_index)| *hash,
@@ -189,8 +190,9 @@ impl GroupValues for GroupValuesRows {
                 }
             }
         } else {
+            let map = self.map.get_partitions(0);
             for (row, &target_hash) in batch_hashes.iter().enumerate() {
-                let entry = self.map.get_mut(0, target_hash, |(exist_hash, group_idx)| {
+                let entry = map.get_mut(target_hash, |(exist_hash, group_idx)| {
                     // Somewhat surprisingly, this closure can be called even if the
                     // hash doesn't match, so check the hash first with an integer
                     // comparison first avoid the more expensive comparison with
@@ -212,7 +214,7 @@ impl GroupValues for GroupValuesRows {
                         group_values.push(group_rows.row(row));
 
                         // for hasher function, use precomputed hash value
-                        self.map.insert_accounted(
+                        map.insert_accounted(
                             0,
                             (target_hash, group_idx),
                             |(hash, _group_index)| *hash,
