@@ -414,6 +414,7 @@ where
                         payload,
                     };
                     self.map.insert_accounted(
+                        0,
                         new_header,
                         |header| header.hash,
                         &mut self.map_size,
@@ -456,6 +457,7 @@ where
                         payload,
                     };
                     self.map.insert_accounted(
+                        0,
                         new_header,
                         |header| header.hash,
                         &mut self.map_size,

@@ -147,14 +147,14 @@ impl GroupValues for GroupValuesRows {
             self.indexes_buffer.iter_mut().for_each(|b| b.clear());
 
             for (row, target_hash) in batch_hashes.iter().enumerate() {
-                let partition_idx = *target_hash as usize % num_partitions;
+                let partition_idx = *target_hash as usize & (num_partitions - 1);
                 self.indexes_buffer[partition_idx].push(row);
             }
 
-            for partition in &self.indexes_buffer {
+            for (part_idx, partition) in self.indexes_buffer.iter().enumerate() {
                 for &row in partition.iter() {
                     let target_hash = batch_hashes[row];
-                    let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
+                    let entry = self.map.get_mut(part_idx, target_hash, |(exist_hash, group_idx)| {
                         // Somewhat surprisingly, this closure can be called even if the
                         // hash doesn't match, so check the hash first with an integer
                         // comparison first avoid the more expensive comparison with
@@ -177,6 +177,7 @@ impl GroupValues for GroupValuesRows {
     
                             // for hasher function, use precomputed hash value
                             self.map.insert_accounted(
+                                part_idx,
                                 (target_hash, group_idx),
                                 |(hash, _group_index)| *hash,
                                 &mut self.map_size,
@@ -189,7 +190,7 @@ impl GroupValues for GroupValuesRows {
             }
         } else {
             for (row, &target_hash) in batch_hashes.iter().enumerate() {
-                let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
+                let entry = self.map.get_mut(0, target_hash, |(exist_hash, group_idx)| {
                     // Somewhat surprisingly, this closure can be called even if the
                     // hash doesn't match, so check the hash first with an integer
                     // comparison first avoid the more expensive comparison with
@@ -212,6 +213,7 @@ impl GroupValues for GroupValuesRows {
 
                         // for hasher function, use precomputed hash value
                         self.map.insert_accounted(
+                            0,
                             (target_hash, group_idx),
                             |(hash, _group_index)| *hash,
                             &mut self.map_size,

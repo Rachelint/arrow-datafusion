@@ -134,6 +134,7 @@ pub trait RawTableAllocExt {
     /// ```
     fn insert_accounted(
         &mut self,
+        partition_idx: usize,
         x: Self::T,
         hasher: impl Fn(&Self::T) -> u64,
         accounting: &mut usize,
@@ -145,6 +146,7 @@ impl<T> RawTableAllocExt for RawTable<T> {
 
     fn insert_accounted(
         &mut self,
+        partition_idx: usize,
         x: Self::T,
         hasher: impl Fn(&Self::T) -> u64,
         accounting: &mut usize,
@@ -178,6 +180,7 @@ impl<T> RawTableAllocExt for HashTableLike<T> {
 
     fn insert_accounted(
         &mut self,
+        partition_idx: usize,
         x: Self::T,
         hasher: impl Fn(&Self::T) -> u64,
         accounting: &mut usize,
@@ -186,8 +189,6 @@ impl<T> RawTableAllocExt for HashTableLike<T> {
         let map = match self {
             HashTableLike::Normal(n) => n,
             HashTableLike::Partitioned(p) => {
-                let num_partitions = p.partitions.len();
-                let partition_idx = hash as usize % num_partitions;
                 let part = &mut p.partitions[partition_idx];
                 part
             }
@@ -231,9 +232,7 @@ impl<T> PartitionedHashTable<T> {
         }
     }
 
-    fn get_mut(&mut self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
-        let num_partitions = self.partitions.len();
-        let partition_idx = hash as usize % num_partitions;
+    fn get_mut(&mut self, partition_idx: usize, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
         let part = &mut self.partitions[partition_idx];
         part.get_mut(hash, eq)
     }
@@ -309,10 +308,10 @@ pub enum HashTableLike<T> {
 }
 
 impl<T> HashTableLike<T> {
-    pub fn get_mut(&mut self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
+    pub fn get_mut(&mut self, partition_idx:usize, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
         match self {
             HashTableLike::Normal(n) => n.get_mut(hash, eq),
-            HashTableLike::Partitioned(p) => p.get_mut(hash, eq),
+            HashTableLike::Partitioned(p) => p.get_mut(partition_idx, hash, eq),
         }
     }
 

@@ -299,7 +299,7 @@ where
                 self.builder.append_value(value);
 
                 self.map
-                    .insert_accounted(new_header, |h| h.hash, &mut self.map_size);
+                    .insert_accounted(0, new_header, |h| h.hash, &mut self.map_size);
                 payload
             };
             observe_payload_fn(payload);
