@@ -66,6 +66,9 @@ pub struct GroupValuesRows {
     /// reused buffer to store hashes
     hashes_buffer: Vec<u64>,
 
+    /// index buffer
+    indexes_buffer: Vec<Vec<usize>>,
+
     /// reused buffer to store rows
     rows_buffer: Rows,
 
@@ -106,6 +109,7 @@ impl GroupValuesRows {
             map_size: 0,
             group_values: None,
             hashes_buffer: Default::default(),
+            indexes_buffer: Default::default(),
             rows_buffer,
             random_state: Default::default(),
         })
@@ -114,8 +118,6 @@ impl GroupValuesRows {
 
 impl GroupValues for GroupValuesRows {
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
-        println!("batch_size:{}", cols[0].len());
-
         // Convert the group keys into the row format
         let group_rows = &mut self.rows_buffer;
         group_rows.clear();
@@ -136,38 +138,89 @@ impl GroupValues for GroupValuesRows {
         batch_hashes.resize(n_rows, 0);
         create_hashes(cols, &self.random_state, batch_hashes)?;
 
-        for (row, &target_hash) in batch_hashes.iter().enumerate() {
-            let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
-                // Somewhat surprisingly, this closure can be called even if the
-                // hash doesn't match, so check the hash first with an integer
-                // comparison first avoid the more expensive comparison with
-                // group value. https://github.com/apache/datafusion/pull/11718
-                target_hash == *exist_hash
-                    // verify that the group that we are inserting with hash is
-                    // actually the same key value as the group in
-                    // existing_idx  (aka group_values @ row)
-                    && group_rows.row(row) == group_values.row(*group_idx)
-            });
+        let num_partitions = self.map.num_partitions();
+        if num_partitions > 1 {
+            if self.indexes_buffer.is_empty() {
+                self.indexes_buffer.resize(num_partitions, Vec::new());
+            }
 
-            let group_idx = match entry {
-                // Existing group_index for this group value
-                Some((_hash, group_idx)) => *group_idx,
-                //  1.2 Need to create new entry for the group
-                None => {
-                    // Add new entry to aggr_state and save newly created index
-                    let group_idx = group_values.num_rows();
-                    group_values.push(group_rows.row(row));
+            self.indexes_buffer.iter_mut().for_each(|b| b.clear());
 
-                    // for hasher function, use precomputed hash value
-                    self.map.insert_accounted(
-                        (target_hash, group_idx),
-                        |(hash, _group_index)| *hash,
-                        &mut self.map_size,
-                    );
-                    group_idx
+            for (row, target_hash) in batch_hashes.iter().enumerate() {
+                let partition_idx = *target_hash as usize % num_partitions;
+                self.indexes_buffer[partition_idx].push(row);
+            }
+
+            for partition in &self.indexes_buffer {
+                for &row in partition.iter() {
+                    let target_hash = batch_hashes[row];
+                    let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
+                        // Somewhat surprisingly, this closure can be called even if the
+                        // hash doesn't match, so check the hash first with an integer
+                        // comparison first avoid the more expensive comparison with
+                        // group value. https://github.com/apache/datafusion/pull/11718
+                        target_hash == *exist_hash
+                            // verify that the group that we are inserting with hash is
+                            // actually the same key value as the group in
+                            // existing_idx  (aka group_values @ row)
+                            && group_rows.row(row) == group_values.row(*group_idx)
+                    });
+    
+                    let group_idx = match entry {
+                        // Existing group_index for this group value
+                        Some((_hash, group_idx)) => *group_idx,
+                        //  1.2 Need to create new entry for the group
+                        None => {
+                            // Add new entry to aggr_state and save newly created index
+                            let group_idx = group_values.num_rows();
+                            group_values.push(group_rows.row(row));
+    
+                            // for hasher function, use precomputed hash value
+                            self.map.insert_accounted(
+                                (target_hash, group_idx),
+                                |(hash, _group_index)| *hash,
+                                &mut self.map_size,
+                            );
+                            group_idx
+                        }
+                    };
+                    groups.push(group_idx);
                 }
-            };
-            groups.push(group_idx);
+            }
+        } else {
+            for (row, &target_hash) in batch_hashes.iter().enumerate() {
+                let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
+                    // Somewhat surprisingly, this closure can be called even if the
+                    // hash doesn't match, so check the hash first with an integer
+                    // comparison first avoid the more expensive comparison with
+                    // group value. https://github.com/apache/datafusion/pull/11718
+                    target_hash == *exist_hash
+                        // verify that the group that we are inserting with hash is
+                        // actually the same key value as the group in
+                        // existing_idx  (aka group_values @ row)
+                        && group_rows.row(row) == group_values.row(*group_idx)
+                });
+
+                let group_idx = match entry {
+                    // Existing group_index for this group value
+                    Some((_hash, group_idx)) => *group_idx,
+                    //  1.2 Need to create new entry for the group
+                    None => {
+                        // Add new entry to aggr_state and save newly created index
+                        let group_idx = group_values.num_rows();
+                        group_values.push(group_rows.row(row));
+
+                        // for hasher function, use precomputed hash value
+                        self.map.insert_accounted(
+                            (target_hash, group_idx),
+                            |(hash, _group_index)| *hash,
+                            &mut self.map_size,
+                        );
+                        group_idx
+                    }
+                };
+                groups.push(group_idx);
+            }
         }
 
         self.group_values = Some(group_values);

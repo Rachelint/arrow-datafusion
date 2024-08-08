@@ -350,4 +350,11 @@ impl<T> HashTableLike<T> {
             }
         }
     }
+
+    pub fn num_partitions(&self) -> usize {
+        match self {
+            HashTableLike::Normal(_) => 1,
+            HashTableLike::Partitioned(p) => p.partitions.len(),
+        }
+    }
 }
