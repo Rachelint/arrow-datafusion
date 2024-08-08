@@ -308,10 +308,10 @@ pub enum HashTableLike<T> {
 }
 
 impl<T> HashTableLike<T> {
-    pub fn get_mut(&mut self, partition_idx:usize, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
+    pub fn get_partitions(&mut self,  partition_idx:usize) -> &mut RawTable<T> {
         match self {
-            HashTableLike::Normal(n) => n.get_mut(hash, eq),
-            HashTableLike::Partitioned(p) => p.get_mut(partition_idx, hash, eq),
+            HashTableLike::Normal(n) => n,
+            HashTableLike::Partitioned(p) => &mut p.partitions[partition_idx],
         }
     }
 
