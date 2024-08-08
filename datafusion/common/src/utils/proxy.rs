@@ -17,7 +17,7 @@
 
 //! [`VecAllocExt`] and [`RawTableAllocExt`] to help tracking of memory allocations
 
-use hashbrown::raw::{Bucket, RawTable};
+use hashbrown::raw::{Bucket, RawIter, RawTable};
 
 /// Extension trait for [`Vec`] to account for allocations.
 pub trait VecAllocExt {
@@ -168,6 +168,185 @@ impl<T> RawTableAllocExt for RawTable<T> {
                     Ok(bucket) => bucket,
                     Err(_) => panic!("just grew the container"),
                 }
+            }
+        }
+    }
+}
+
+impl<T> RawTableAllocExt for HashTableLike<T> {
+    type T = T;
+
+    fn insert_accounted(
+        &mut self,
+        x: Self::T,
+        hasher: impl Fn(&Self::T) -> u64,
+        accounting: &mut usize,
+    ) -> Bucket<Self::T> {
+        let hash = hasher(&x);
+        let map = match self {
+            HashTableLike::Normal(n) => n,
+            HashTableLike::Partitioned(p) => {
+                let num_partitions = p.partitions.len();
+                let partition_idx = hash as usize % num_partitions;
+                let part = &mut p.partitions[partition_idx];
+                part
+            }
+        };
+
+        match map.try_insert_no_grow(hash, x) {
+            Ok(bucket) => bucket,
+            Err(x) => {
+                // need to request more memory
+
+                let bump_elements = map.capacity().max(16);
+                let bump_size = bump_elements * std::mem::size_of::<T>();
+                *accounting = (*accounting).checked_add(bump_size).expect("overflow");
+
+                map.reserve(bump_elements, hasher);
+
+                // still need to insert the element since first try failed
+                // Note: cannot use `.expect` here because `T` may not implement `Debug`
+                match map.try_insert_no_grow(hash, x) {
+                    Ok(bucket) => bucket,
+                    Err(_) => panic!("just grew the container"),
+                }
+            }
+        }
+    }
+}
+
+pub struct PartitionedHashTable<T> {
+    partitions: Vec<RawTable<T>>,
+}
+
+impl<T> PartitionedHashTable<T> {
+    pub fn new(num_parts: usize) -> Self {
+        let mut partitions = Vec::with_capacity(num_parts);
+        for _ in 0..num_parts {
+            partitions.push(RawTable::with_capacity(0));
+        }
+        
+        Self {
+            partitions,
+        }
+    }
+
+    fn get_mut(&mut self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
+        let num_partitions = self.partitions.len();
+        let partition_idx = hash as usize % num_partitions;
+        let part = &mut self.partitions[partition_idx];
+        part.get_mut(hash, eq)
+    }
+
+    fn iter(&self) -> PartitionedHashTableIter<'_, T> {
+        let parts = self.partitions.iter();
+        PartitionedHashTableIter {
+            parts: Box::new(parts),
+            state: PartitionedHashTableIterState::Init,
+        }
+    }
+
+    fn erase(&mut self, hash: u64, bucket: Bucket<T>) {
+        let num_partitions = self.partitions.len();
+        let partition_idx = hash as usize % num_partitions;
+        let part = &mut self.partitions[partition_idx];
+        unsafe {
+            part.erase(bucket);
+        }
+    }
+}
+
+struct PartitionedHashTableIter<'a, T> {
+    parts: Box<dyn Iterator<Item = &'a RawTable<T>> + 'a>,
+    state: PartitionedHashTableIterState<T>,
+}
+
+impl<'a, T> Iterator for PartitionedHashTableIter<'a, T> {
+    type Item = Bucket<T>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            match &mut self.state {
+                PartitionedHashTableIterState::Init => {
+                    let part_opt = self.parts.next();
+                    match part_opt {
+                        Some(part) => {
+                            let iter = unsafe { part.iter() };
+                            self.state = PartitionedHashTableIterState::Polling(iter);
+                        }
+                        None => {
+                            self.state = PartitionedHashTableIterState::Finished;
+                            return None;
+                        }
+                    }
+                }
+                PartitionedHashTableIterState::Polling(iter) => {
+                    let bucket_opt = iter.next();
+                    match bucket_opt {
+                        Some(bucket) => {
+                            return Some(bucket);
+                        }
+                        None => {
+                            self.state = PartitionedHashTableIterState::Init;
+                        }
+                    }
+                }
+                PartitionedHashTableIterState::Finished => return None,
+            }
+        }
+    }
+}
+
+enum PartitionedHashTableIterState<T> {
+    Init,
+    Polling(RawIter<T>),
+    Finished,
+}
+
+pub enum HashTableLike<T> {
+    Normal(RawTable<T>),
+    Partitioned(PartitionedHashTable<T>),
+}
+
+impl<T> HashTableLike<T> {
+    pub fn get_mut(&mut self, hash: u64, eq: impl FnMut(&T) -> bool) -> Option<&mut T> {
+        match self {
+            HashTableLike::Normal(n) => n.get_mut(hash, eq),
+            HashTableLike::Partitioned(p) => p.get_mut(hash, eq),
+        }
+    }
+
+    pub fn iter(&self) -> Box<dyn Iterator<Item = Bucket<T>> + '_> {
+        match self {
+            HashTableLike::Normal(n) => unsafe { Box::new(n.iter()) },
+            HashTableLike::Partitioned(p) => Box::new(p.iter()),
+        }
+    }
+
+    pub fn erase(&mut self, hash: u64, bucket: Bucket<T>) {
+        match self {
+            HashTableLike::Normal(n) => unsafe {
+                n.erase(bucket);
+            },
+            HashTableLike::Partitioned(p) => {
+                p.erase(hash, bucket);
+            }
+        }
+    }
+
+    pub fn clear_shrink(&mut self, shrink_size: usize) -> usize {
+        match self {
+            HashTableLike::Normal(n) => {
+                n.clear();
+                n.shrink_to(shrink_size, |_| 0); // hasher does not matter since the map is cleared
+                n.capacity() * std::mem::size_of::<T>()
+            }
+            HashTableLike::Partitioned(_) => {
+                let new_map = RawTable::with_capacity(shrink_size);
+                let new_map_size = new_map.capacity() * std::mem::size_of::<T>();
+                *self = HashTableLike::Normal(new_map);
+
+                new_map_size
             }
         }
     }

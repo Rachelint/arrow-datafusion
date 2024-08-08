@@ -16,6 +16,7 @@
 // under the License.
 
 use crate::aggregates::group_values::GroupValues;
+use crate::aggregates::AggregateMode;
 use ahash::RandomState;
 use arrow::compute::cast;
 use arrow::record_batch::RecordBatch;
@@ -23,6 +24,7 @@ use arrow::row::{RowConverter, Rows, SortField};
 use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
+use datafusion_common::utils::proxy::{HashTableLike, PartitionedHashTable};
 use datafusion_common::{DataFusionError, Result};
 use datafusion_execution::memory_pool::proxy::{RawTableAllocExt, VecAllocExt};
 use datafusion_expr::EmitTo;
@@ -44,7 +46,7 @@ pub struct GroupValuesRows {
     ///
     /// keys: u64 hashes of the GroupValue
     /// values: (hash, group_index)
-    map: RawTable<(u64, usize)>,
+    map: HashTableLike<(u64, usize)>,
 
     /// The size of `map` in bytes
     map_size: usize,
@@ -70,7 +72,7 @@ pub struct GroupValuesRows {
 }
 
 impl GroupValuesRows {
-    pub fn try_new(schema: SchemaRef) -> Result<Self> {
+    pub fn try_new(schema: SchemaRef, agg_mode: AggregateMode) -> Result<Self> {
         let row_converter = RowConverter::new(
             schema
                 .fields()
@@ -79,7 +81,15 @@ impl GroupValuesRows {
                 .collect(),
         )?;
 
-        let map = RawTable::with_capacity(0);
+        let map = match agg_mode {
+            AggregateMode::Partial => HashTableLike::Normal(RawTable::with_capacity(0)),
+            AggregateMode::Final |
+            AggregateMode::FinalPartitioned |
+            AggregateMode::Single |
+            AggregateMode::SinglePartitioned => {
+                HashTableLike::Partitioned(PartitionedHashTable::new(16))
+            },
+        };
 
         let starting_rows_capacity = 1000;
         let starting_data_capacity = 64 * starting_rows_capacity;
@@ -206,12 +216,14 @@ impl GroupValues for GroupValuesRows {
                 unsafe {
                     for bucket in self.map.iter() {
                         // Decrement group index by n
-                        match bucket.as_ref().1.checked_sub(n) {
-                            // Group index was >= n, shift value down
-                            Some(sub) => bucket.as_mut().1 = sub,
-                            // Group index was < n, so remove from table
-                            None => self.map.erase(bucket),
-                        }
+                        // let (hash, group_idx) = bucket.as_ref();
+                        // let hash = *hash;
+                        // match group_idx.checked_sub(n) {
+                        //     // Group index was >= n, shift value down
+                        //     Some(sub) => bucket.as_mut().1 = sub,
+                        //     // Group index was < n, so remove from table
+                        //     None => self.map.erase(hash, bucket),
+                        // }
                     }
                 }
                 output
@@ -242,9 +254,11 @@ impl GroupValues for GroupValuesRows {
             rows.clear();
             rows
         });
-        self.map.clear();
-        self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
-        self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
+
+        self.map_size = self.map.clear_shrink(count);
+        // self.map.clear();
+        // self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
+        // self.map_size = self.map.capacity() * std::mem::size_of::<(u64, usize)>();
         self.hashes_buffer.clear();
         self.hashes_buffer.shrink_to(count);
     }
