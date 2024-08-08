@@ -15,6 +15,8 @@
 // specific language governing permissions and limitations
 // under the License.
 
+use std::env;
+
 use crate::aggregates::group_values::GroupValues;
 use crate::aggregates::AggregateMode;
 use ahash::RandomState;
@@ -87,7 +89,9 @@ impl GroupValuesRows {
             AggregateMode::FinalPartitioned |
             AggregateMode::Single |
             AggregateMode::SinglePartitioned => {
-                HashTableLike::Partitioned(PartitionedHashTable::new(16))
+                let num_parts = env::var("TEST_NUM_PARTS").unwrap_or("16".to_string());
+                let num_parts = num_parts.parse::<usize>().unwrap();
+                HashTableLike::Partitioned(PartitionedHashTable::new(num_parts))
             },
         };
 
