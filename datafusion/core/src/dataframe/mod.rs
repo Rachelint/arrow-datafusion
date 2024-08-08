@@ -61,6 +61,7 @@ use datafusion_functions_aggregate::expr_fn::{
 
 use async_trait::async_trait;
 use datafusion_catalog::Session;
+use datafusion_physical_plan::displayable;
 
 /// Contains options that control how data is
 /// written out from a DataFrame
@@ -989,6 +990,7 @@ impl DataFrame {
     pub async fn collect(self) -> Result<Vec<RecordBatch>> {
         let task_ctx = Arc::new(self.task_ctx());
         let plan = self.create_physical_plan().await?;
+        dbg!(displayable(plan.as_ref()));
         collect(plan, task_ctx).await
     }
 

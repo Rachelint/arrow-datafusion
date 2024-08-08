@@ -309,6 +309,7 @@ pub enum HashTableLike<T> {
 
 impl<T> HashTableLike<T> {
     pub fn get_partitions(&mut self,  partition_idx:usize) -> &mut RawTable<T> {
+        dbg!("partitions", self.num_partitions());
         match self {
             HashTableLike::Normal(n) => n,
             HashTableLike::Partitioned(p) => &mut p.partitions[partition_idx],
