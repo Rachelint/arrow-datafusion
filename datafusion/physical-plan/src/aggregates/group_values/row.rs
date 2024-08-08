@@ -24,7 +24,7 @@ use arrow_array::{Array, ArrayRef};
 use arrow_schema::{DataType, SchemaRef};
 use datafusion_common::hash_utils::create_hashes;
 use datafusion_common::{DataFusionError, Result};
-use datafusion_execution::memory_pool::proxy::{RawTableAllocExt, VecAllocExt};
+use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_expr::EmitTo;
 use hashbrown::raw::RawTable;
 
@@ -121,37 +121,78 @@ impl GroupValues for GroupValuesRows {
         create_hashes(cols, &self.random_state, batch_hashes)?;
 
         for (row, &target_hash) in batch_hashes.iter().enumerate() {
-            let entry = self.map.get_mut(target_hash, |(exist_hash, group_idx)| {
-                // Somewhat surprisingly, this closure can be called even if the
-                // hash doesn't match, so check the hash first with an integer
-                // comparison first avoid the more expensive comparison with
-                // group value. https://github.com/apache/datafusion/pull/11718
-                target_hash == *exist_hash
-                    // verify that the group that we are inserting with hash is
-                    // actually the same key value as the group in
-                    // existing_idx  (aka group_values @ row)
-                    && group_rows.row(row) == group_values.row(*group_idx)
-            });
+            // let entry = self.map.find_or_find_insert_slot(hash, eq, )
+            let entry = self.map.find_or_find_insert_slot(target_hash, |(exist_hash, group_idx)| {
+                    // Somewhat surprisingly, this closure can be called even if the
+                    // hash doesn't match, so check the hash first with an integer
+                    // comparison first avoid the more expensive comparison with
+                    // group value. https://github.com/apache/datafusion/pull/11718
+                    target_hash == *exist_hash
+                        // verify that the group that we are inserting with hash is
+                        // actually the same key value as the group in
+                        // existing_idx  (aka group_values @ row)
+                        && group_rows.row(row) == group_values.row(*group_idx)
+                },
+                |(hash, _group_index)| *hash
+            );
 
             let group_idx = match entry {
                 // Existing group_index for this group value
-                Some((_hash, group_idx)) => *group_idx,
-                //  1.2 Need to create new entry for the group
-                None => {
-                    // Add new entry to aggr_state and save newly created index
+                Ok(bucket) => {
+                    let (_hash, group_idx) = unsafe { bucket.as_ref() };
+                    *group_idx
+                }
+                Err(slot) => {
                     let group_idx = group_values.num_rows();
                     group_values.push(group_rows.row(row));
 
-                    // for hasher function, use precomputed hash value
-                    self.map.insert_accounted(
-                        (target_hash, group_idx),
-                        |(hash, _group_index)| *hash,
-                        &mut self.map_size,
-                    );
+                    // Need to add new entry to aggr_state and save newly created index
+                    // We check if the capacity is enough first
+                    if self.map.capacity() - self.map.len() > 1 {
+                        unsafe {
+                            self.map.insert_in_slot(target_hash, slot, (target_hash, group_idx));
+                        }
+                    } else {
+                        // need to request more memory
+                        let bump_elements = self.map.capacity().max(16);
+                        let bump_size = bump_elements * std::mem::size_of::<(u64, usize)>();
+                        self.map_size = (self.map_size).checked_add(bump_size).expect("overflow");
+
+                        self.map.reserve(bump_elements, |(hash, _group_index)| *hash);
+
+                        // still need to insert the element since first try failed
+                        // Note: cannot use `.expect` here because `T` may not implement `Debug`
+                        match self.map.try_insert_no_grow(target_hash, (target_hash, group_idx)) {
+                            Ok(_) => {},
+                            Err(_) => panic!("just grew the container"),
+                        }                        
+                    }
+
                     group_idx
                 }
             };
+
             groups.push(group_idx);
+
+            // let group_idx = match entry {
+            //     // Existing group_index for this group value
+            //     Some((_hash, group_idx)) => *group_idx,
+            //     //  1.2 Need to create new entry for the group
+            //     None => {
+            //         // Add new entry to aggr_state and save newly created index
+            //         let group_idx = group_values.num_rows();
+            //         group_values.push(group_rows.row(row));
+
+            //         // for hasher function, use precomputed hash value
+            //         self.map.insert_accounted(
+            //             (target_hash, group_idx),
+            //             |(hash, _group_index)| *hash,
+            //             &mut self.map_size,
+            //         );
+            //         group_idx
+            //     }
+            // };
+            // groups.push(group_idx);
         }
 
         self.group_values = Some(group_values);
