@@ -151,7 +151,12 @@ impl GroupValues for GroupValuesRows {
                 self.indexes_buffer[partition_idx].push(row);
             }
 
+            let mut partition_cnt = 0;
             for (part_idx, partition) in self.indexes_buffer.iter().enumerate() {
+                if !partition.is_empty() {
+                    partition_cnt += 1;
+                }
+
                 let part = self.map.get_partitions(part_idx);
                 for &row in partition.iter() {
                     let target_hash = batch_hashes[row];
@@ -189,6 +194,7 @@ impl GroupValues for GroupValuesRows {
                     groups.push(group_idx);
                 }
             }
+            println!("### partitions cnt:{partition_cnt}");
         } else {
             let map = self.map.get_partitions(0);
             for (row, &target_hash) in batch_hashes.iter().enumerate() {
