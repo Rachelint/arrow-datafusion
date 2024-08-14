@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, AsArray, BooleanArray, BooleanBufferBuilder};
 use arrow::buffer::BooleanBuffer;
-use datafusion_common::Result;
+use datafusion_common::{DataFusionError, Result};
 use datafusion_expr_common::groups_accumulator::{EmitTo, GroupsAccumulator};
 
 use super::accumulate::NullState;
@@ -109,9 +109,14 @@ where
                 }
                 first_n
             }
+            EmitTo::CurrentBlock(_) => {
+                return Err(DataFusionError::NotImplemented(
+                    "blocked group values management is not supported".to_string(),
+                ))
+            }
         };
 
-        let nulls = self.null_state.build(emit_to);
+        let nulls = self.null_state.build(emit_to)?;
         let values = BooleanArray::new(values, Some(nulls));
         Ok(Arc::new(values))
     }
