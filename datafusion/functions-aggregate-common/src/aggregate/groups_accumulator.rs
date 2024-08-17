@@ -457,7 +457,9 @@ pub fn ensure_enough_room_for_values<T: Clone>(
             } else {
                 (0, 0)
             };
+            dbg!("-------------------------------");
             let exist_blks = dbg!(values.len());
+            dbg!(&total_num_groups);
 
             // Ensure blks are enough.
             let new_blks = (total_num_groups + blk_size - 1) / blk_size - exist_blks;
