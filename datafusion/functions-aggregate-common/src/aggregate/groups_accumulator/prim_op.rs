@@ -138,6 +138,8 @@ where
     }
 
     fn evaluate(&mut self, emit_to: EmitTo) -> Result<ArrayRef> {
+        dbg!("evaluate");
+
         let values = emit_to.take_needed_from_blocks(&mut self.values_blocks, self.mode);
         let nulls = self.null_state.build(emit_to);
         let values = PrimitiveArray::<T>::new(values.into(), Some(nulls)) // no copy
@@ -147,6 +149,8 @@ where
     }
 
     fn state(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
+        dbg!("evaluate");
+
         self.evaluate(emit_to).map(|arr| vec![arr])
     }
 

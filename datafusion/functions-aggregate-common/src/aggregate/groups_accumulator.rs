@@ -464,6 +464,7 @@ pub fn ensure_enough_room_for_values<T: Clone>(
 
             // Ensure blks are enough.
             let new_blks = (total_num_groups + blk_size - 1) / blk_size - exist_blks;
+            dbg!(&new_blks);
             values.reserve(new_blks);
             for _ in 0..new_blks {
                 values.push_back(Vec::with_capacity(blk_size));
