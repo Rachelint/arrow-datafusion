@@ -28,6 +28,9 @@ use datafusion_functions::string;
 use rand::{distributions::Alphanumeric, rngs::StdRng, Rng, SeedableRng};
 use std::{fmt, sync::Arc};
 
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub fn seedable_rng() -> StdRng {
     StdRng::seed_from_u64(42)
 }

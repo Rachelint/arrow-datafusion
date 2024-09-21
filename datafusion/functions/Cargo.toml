@@ -91,6 +91,7 @@ criterion = "0.5"
 rand = { workspace = true }
 rstest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+mimalloc = { version = "0.1", default-features = false }
 
 [[bench]]
 harness = false
