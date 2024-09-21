@@ -139,7 +139,11 @@ fn run_with_string_type<M: Measurement>(
         format!(
             "{string_type} [size={size}, len_before={len}, len_after={remaining_len}]",
         ),
-        |b| b.iter(|| black_box(ltrim.invoke(&args))),
+        |b| b.iter(|| {
+            for _ in 0..10000 {
+                let _ = black_box(ltrim.invoke(&args));
+            }
+        }),
     );
 }
 
