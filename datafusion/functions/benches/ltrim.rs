@@ -157,7 +157,7 @@ fn run_one_group(
 ) {
     let mut group = c.benchmark_group(group_name);
     group.sampling_mode(SamplingMode::Flat);
-    group.sample_size(10);
+    group.sample_size(1000);
 
     for string_type in string_types {
         run_with_string_type(
@@ -181,25 +181,27 @@ fn criterion_benchmark(c: &mut Criterion) {
 
     let string_types = [
         StringArrayType::Utf8View,
-        StringArrayType::Utf8,
-        StringArrayType::LargeUtf8,
+        // StringArrayType::Utf8,
+        // StringArrayType::LargeUtf8,
     ];
-    for size in [1024, 4096, 8192] {
+
+    for size in [8192] {
+    // for size in [1024, 4096, 8192] {
         // len=12, trimmed_len=4, len_after_ltrim=8
-        let len = 12;
-        let trimmed = characters;
-        let remaining_len = len - trimmed.len();
-        run_one_group(
-            c,
-            "INPUT LEN <= 12",
-            &ltrim,
-            &string_types,
-            size,
-            len,
-            characters,
-            trimmed,
-            remaining_len,
-        );
+        // let len = 12;
+        // let trimmed = characters;
+        // let remaining_len = len - trimmed.len();
+        // run_one_group(
+        //     c,
+        //     "INPUT LEN <= 12",
+        //     &ltrim,
+        //     &string_types,
+        //     size,
+        //     len,
+        //     characters,
+        //     trimmed,
+        //     remaining_len,
+        // );
 
         // len=64, trimmed_len=4, len_after_ltrim=60
         let len = 64;
@@ -218,20 +220,20 @@ fn criterion_benchmark(c: &mut Criterion) {
         );
 
         // len=64, trimmed_len=56, len_after_ltrim=8
-        let len = 64;
-        let trimmed = characters.repeat(15);
-        let remaining_len = len - trimmed.len();
-        run_one_group(
-            c,
-            "INPUT LEN > 12, OUTPUT LEN <= 12",
-            &ltrim,
-            &string_types,
-            size,
-            len,
-            characters,
-            &trimmed,
-            remaining_len,
-        );
+        // let len = 64;
+        // let trimmed = characters.repeat(15);
+        // let remaining_len = len - trimmed.len();
+        // run_one_group(
+        //     c,
+        //     "INPUT LEN > 12, OUTPUT LEN <= 12",
+        //     &ltrim,
+        //     &string_types,
+        //     size,
+        //     len,
+        //     characters,
+        //     &trimmed,
+        //     remaining_len,
+        // );
     }
 }
 
