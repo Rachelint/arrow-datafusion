@@ -588,11 +588,14 @@ impl Stream for GroupedHashAggregateStream {
                                 &group_by_values,
                             )?;
                             if self.skip_partial_aggregation {
+                                dbg!("skip_partial_aggregation");
                                 let states = self.transform_to_states(batch)?;
                                 self.exec_state = ExecutionState::ProducingOutput(states);
                                 // make sure the exec_state just set is not overwritten below
                                 break 'reading_input;
-                            }
+                            } else {
+                                dbg!("not skip_partial_aggregation");
+                            };
                             extract_ok!(self.group_aggregate_batch(
                                 batch,
                                 group_by_values,
