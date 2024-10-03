@@ -153,8 +153,11 @@ impl SkipAggregationProbe {
         }
         self.input_rows += batch_hashes.len();
 
-        self.unique_hashes_count.len() as f64 / self.input_rows as f64
-            > self.probe_ratio_threshold
+        dbg!(unique_hashes_count.len());
+        dbg!(self.input_rows);
+        dbg!(self.probe_ratio_threshold);
+        dbg!(self.unique_hashes_count.len() as f64 / self.input_rows as f64
+            > self.probe_ratio_threshold)
     }
 }
 
