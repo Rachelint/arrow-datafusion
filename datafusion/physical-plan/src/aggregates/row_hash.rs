@@ -795,6 +795,7 @@ impl GroupedHashAggregateStream {
         }?;
 
         self.hashes_buffer.resize(group_by_values.len(), Vec::new());
+        dbg!(group_by_values.len());
         for (index, group_values) in group_by_values.iter().enumerate() {
             let n_rows = group_values[0].len();
             let batch_hashes = &mut self.hashes_buffer[index];
