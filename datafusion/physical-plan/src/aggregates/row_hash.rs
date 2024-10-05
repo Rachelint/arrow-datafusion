@@ -590,7 +590,15 @@ impl Stream for GroupedHashAggregateStream {
                             extract_ok!(
                                 self.group_aggregate_batch_with_skipping_partial(&batch)
                             );
+
                             if self.skip_partial_aggregation {
+                                let batch = self.emit(EmitTo::All, false)?;
+                                if batch.num_rows() != 0 {
+                                    panic!(
+                                        "we should emit first, remaining rows:{}",
+                                        batch.num_rows()
+                                    );
+                                }
                                 let states = self.transform_to_states(batch)?;
                                 self.exec_state = ExecutionState::ProducingOutput(states);
                                 // make sure the exec_state just set is not overwritten below
