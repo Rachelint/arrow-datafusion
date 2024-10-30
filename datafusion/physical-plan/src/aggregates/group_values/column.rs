@@ -108,9 +108,6 @@ pub struct VectorizedGroupValuesColumn {
     ///
     map: RawTable<(u64, GroupIndexView)>,
 
-    /// The size of `map` in bytes
-    map_size: usize,
-
     /// The lists for group indices with the same hash value
     ///
     /// It is possible that hash value collision exists,
@@ -162,7 +159,6 @@ impl VectorizedGroupValuesColumn {
             schema,
             map,
             group_index_lists: Vec::new(),
-            map_size: 0,
             group_values: vec![],
             hashes_buffer: Default::default(),
             random_state: Default::default(),
@@ -199,33 +195,41 @@ impl VectorizedGroupValuesColumn {
 
         let mut group_values_len = self.group_values[0].len();
         for (row, &target_hash) in batch_hashes.iter().enumerate() {
-            let entry = self
-                .map
-                .get(target_hash, |(exist_hash, _)| target_hash == *exist_hash);
+            let find_result = self.map.find_or_find_insert_slot(
+                target_hash,
+                |(exist_hash, _)| target_hash == *exist_hash,
+                |(hash, _)| *hash,
+            );
 
-            let Some((_, group_index_view)) = entry else {
-                // 1. Bucket not found case
-                // Build `new inlined group index view`
-                let current_group_idx = group_values_len;
-                let group_index_view =
-                    GroupIndexView::new_inlined(current_group_idx as u64);
+            let (_, group_index_view) = match find_result {
+                Err(slot) => {
+                    // 1. Bucket not found case
+                    // Build `new inlined group index view`
+                    let current_group_idx = group_values_len;
+                    let group_index_view =
+                        GroupIndexView::new_inlined(current_group_idx as u64);
 
-                // Insert the `group index view` and its hash into `map`
-                // for hasher function, use precomputed hash value
-                self.map.insert_accounted(
-                    (target_hash, group_index_view),
-                    |(hash, _)| *hash,
-                    &mut self.map_size,
-                );
+                    // Insert the `group index view` and its hash into `map`
+                    // for hasher function, use precomputed hash value
+                    // SAFETY: No mutation occurred since find_or_find_insert_slot
+                    unsafe {
+                        self.map.insert_in_slot(
+                            target_hash,
+                            slot,
+                            (target_hash, group_index_view),
+                        );
+                    }
 
-                // Add row index to `vectorized_append_row_indices`
-                self.vectorized_append_row_indices.push(row);
+                    // Add row index to `vectorized_append_row_indices`
+                    self.vectorized_append_row_indices.push(row);
 
-                // Set group index to row in `groups`
-                groups[row] = current_group_idx;
+                    // Set group index to row in `groups`
+                    groups[row] = current_group_idx;
 
-                group_values_len += 1;
-                continue;
+                    group_values_len += 1;
+                    continue;
+                }
+                Ok(bucket) => unsafe { bucket.as_ref() },
             };
 
             // 2. bucket found
@@ -273,7 +277,7 @@ impl VectorizedGroupValuesColumn {
     ///    and perform `scalarized_intern` for them after.
     ///    Usually, such `rows` having same hash but different value with `exists rows`
     ///    are very few.
-    fn vectorized_equal_to(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) {
+    fn vectorized_equal_to(&mut self, cols: &[ArrayRef], groups: &mut [usize]) {
         assert_eq!(
             self.vectorized_equal_to_group_indices.len(),
             self.vectorized_equal_to_row_indices.len()
@@ -629,7 +633,8 @@ impl GroupValues for VectorizedGroupValuesColumn {
 
     fn size(&self) -> usize {
         let group_values_size: usize = self.group_values.iter().map(|v| v.size()).sum();
-        group_values_size + self.map_size + self.hashes_buffer.allocated_size()
+        let map_size = self.map.capacity() * size_of::<(u64, usize)>();
+        group_values_size + map_size + self.hashes_buffer.allocated_size()
     }
 
     fn is_empty(&self) -> bool {
@@ -743,7 +748,6 @@ impl GroupValues for VectorizedGroupValuesColumn {
         self.group_values.clear();
         self.map.clear();
         self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
-        self.map_size = self.map.capacity() * size_of::<(u64, usize)>();
         self.hashes_buffer.clear();
         self.hashes_buffer.shrink_to(count);
         self.group_index_lists.clear();
