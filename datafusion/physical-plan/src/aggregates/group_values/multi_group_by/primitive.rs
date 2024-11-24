@@ -171,30 +171,34 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
     ) {
         let array = array.as_primitive::<T>();
 
-        let iter = izip!(
-            lhs_rows.iter(),
-            rhs_rows.iter(),
-            equal_to_results.iter_mut(),
-        );
+        // Take rows from exist and input
+        let exist_array = self.take_from_exist_column(lhs_rows);
+        let input_array = self.take_from_input_column(array, rhs_rows);
 
-        for (&lhs_row, &rhs_row, equal_to_result) in iter {
-            // Has found not equal to in previous column, don't need to check
-            if !*equal_to_result {
-                continue;
-            }
+        // Vectorized compare them, and set the results
+        let array_equal_to_result = not_distinct(&exist_array, &input_array)
+            .expect("fail to compare exist and input arrays");
 
-            // Perf: skip null check (by short circuit) if input is not nullable
-            if NULLABLE {
-                let exist_null = self.nulls.is_null(lhs_row);
-                let input_null = array.is_null(rhs_row);
-                if let Some(result) = nulls_equal_to(exist_null, input_null) {
-                    *equal_to_result = result;
-                    continue;
-                }
-                // Otherwise, we need to check their values
-            }
+        equal_to_results
+            .iter_mut()
+            .zip(array_equal_to_result.values().iter())
+            .for_each(|(total, current)| *total &= current);
 
-            *equal_to_result = self.group_values[lhs_row] == array.value(rhs_row);
+        // Finally, return buffers
+        let (_, values, nulls) = exist_array.into_parts();
+        let values_buffer = values.into_inner().into_vec().unwrap();
+        self.exist_values_buffer = values_buffer;
+        if let Some(nulls) = nulls {
+            let nulls_buffer = nulls.into_inner().into_inner().into_mutable().unwrap();
+            self.exist_nulls_buffer = nulls_buffer;
+        }
+
+        let (_, values, nulls) = input_array.into_parts();
+        let values_buffer = values.into_inner().into_vec().unwrap();
+        self.input_values_buffer = values_buffer;
+        if let Some(nulls) = nulls {
+            let nulls_buffer = nulls.into_inner().into_inner().into_mutable().unwrap();
+            self.input_nulls_buffer = nulls_buffer;
         }
     }
 
