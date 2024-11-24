@@ -19,11 +19,11 @@ use crate::aggregates::group_values::multi_group_by::{nulls_equal_to, GroupColum
 use crate::aggregates::group_values::null_builder::MaybeNullBufferBuilder;
 use arrow::array::PrimitiveBuilder;
 use arrow::buffer::ScalarBuffer;
-use arrow::compute::{self, take};
 use arrow::compute::kernels::take;
+use arrow::compute::{self, take};
 use arrow_array::cast::AsArray;
 use arrow_array::{Array, ArrayRef, ArrowPrimitiveType, PrimitiveArray};
-use arrow_buffer::{BooleanBufferBuilder, MutableBuffer};
+use arrow_buffer::{ArrowNativeType, BooleanBufferBuilder, MutableBuffer};
 use arrow_ord::cmp::not_distinct;
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use itertools::izip;
@@ -44,10 +44,11 @@ pub struct PrimitiveGroupValueBuilder<T: ArrowPrimitiveType, const NULLABLE: boo
     group_values: Vec<T::Native>,
     nulls: MaybeNullBufferBuilder,
 
-    exist_values_buffer: MutableBuffer,
     exist_nulls_buffer: MutableBuffer,
-    input_values_buffer: MutableBuffer,
     input_nulls_buffer: MutableBuffer,
+
+    exist_values_buffer: Vec<T::Native>,
+    input_values_buffer: Vec<T::Native>,
 }
 
 impl<T, const NULLABLE: bool> PrimitiveGroupValueBuilder<T, NULLABLE>
@@ -59,11 +60,10 @@ where
         Self {
             group_values: vec![],
             nulls: MaybeNullBufferBuilder::new(),
-            exist_values_buffer: MutableBuffer::new(0),
             exist_nulls_buffer: MutableBuffer::new(0),
-            input_values_buffer: MutableBuffer::new(0),
             input_nulls_buffer: MutableBuffer::new(0),
-            
+            exist_values_buffer: Vec::new(),
+            input_values_buffer: Vec::new(),
         }
     }
 }
@@ -99,12 +99,6 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
             self.group_values.push(array.as_primitive::<T>().value(row));
         }
     }
-
-    // fn take_from_exists(&mut self, lhs_rows: &[usize]) -> PrimitiveArray<T> {
-    //     // Take value firstly
-    //     // take(values, indices, options)
-    //     take(values, indices, options)
-    // }
 
     fn vectorized_equal_to(
         &mut self,
@@ -226,6 +220,17 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
             first_n_nulls,
         ))
     }
+}
+
+fn build_values_with_buffer<I, T>(values_iter: I, mut buffer: Vec<T>) -> ScalarBuffer<T>
+where
+    I: Iterator<Item = T>,
+    T: ArrowNativeType,
+{
+    buffer.clear();
+    buffer.extend(values_iter);
+
+    ScalarBuffer::from(buffer)
 }
 
 #[cfg(test)]
