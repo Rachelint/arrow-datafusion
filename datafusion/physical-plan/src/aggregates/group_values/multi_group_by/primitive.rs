@@ -16,7 +16,9 @@
 // under the License.
 
 use crate::aggregates::group_values::multi_group_by::{nulls_equal_to, GroupColumn};
-use crate::aggregates::group_values::null_builder::MaybeNullBufferBuilder;
+use crate::aggregates::group_values::null_builder::{
+    build_nulls_with_buffer, MaybeNullBufferBuilder,
+};
 use arrow::array::PrimitiveBuilder;
 use arrow::buffer::ScalarBuffer;
 use arrow::compute::kernels::take;
@@ -65,6 +67,66 @@ where
             exist_values_buffer: Vec::new(),
             input_values_buffer: Vec::new(),
         }
+    }
+
+    fn take_from_exist_column(&mut self, rows: &[usize]) -> PrimitiveArray<T> {
+        // Take nulls
+        let nulls = if NULLABLE {
+            let nulls_iter = rows.iter().map(|row| !self.nulls.is_null(*row));
+            let buffer =
+                mem::replace(&mut self.exist_nulls_buffer, MutableBuffer::new(0));
+
+            let (null_buffer_opt, buffer_opt) =
+                build_nulls_with_buffer(nulls_iter, rows.len(), buffer);
+            if let Some(buffer) = buffer_opt {
+                self.exist_nulls_buffer = buffer;
+            }
+
+            null_buffer_opt
+        } else {
+            None
+        };
+
+        // Take values
+        let buffer = mem::take(&mut self.exist_values_buffer);
+        let group_values_iter = rows.iter().map(|row| self.group_values[*row].clone());
+        let values = build_values_with_buffer(group_values_iter, buffer);
+
+        PrimitiveArray::new(values, nulls)
+    }
+
+    fn take_from_input_column(
+        &mut self,
+        array: &PrimitiveArray<T>,
+        rows: &[usize],
+    ) -> PrimitiveArray<T> {
+        let input_nulls = array.nulls();
+        let input_values = array.values();
+
+        // Take nulls
+        let nulls = if NULLABLE && input_nulls.is_some() {
+            let nulls = input_nulls.unwrap();
+            let nulls_iter = rows.iter().map(|row| nulls.is_valid(*row));
+            let buffer =
+                mem::replace(&mut self.exist_nulls_buffer, MutableBuffer::new(0));
+
+            let (null_buffer_opt, buffer_opt) =
+                build_nulls_with_buffer(nulls_iter, rows.len(), buffer);
+            if let Some(buffer) = buffer_opt {
+                self.input_nulls_buffer = buffer;
+            }
+
+            null_buffer_opt
+        } else {
+            None
+        };
+
+        // Take values
+        let buffer = mem::take(&mut self.exist_values_buffer);
+        let group_values_iter = rows.iter().map(|row| input_values[*row].clone());
+        let values = build_values_with_buffer(group_values_iter, buffer);
+
+        PrimitiveArray::new(values, nulls)
     }
 }
 
