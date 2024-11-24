@@ -102,6 +102,7 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
 
     // fn take_from_exists(&mut self, lhs_rows: &[usize]) -> PrimitiveArray<T> {
     //     // Take value firstly
+    //     // take(values, indices, options)
     //     take(values, indices, options)
     // }
 

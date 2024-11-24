@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use arrow_buffer::{BooleanBufferBuilder, MutableBuffer, NullBuffer};
+use arrow_buffer::{bit_util, BooleanBuffer, BooleanBufferBuilder, MutableBuffer, NullBuffer};
 
 /// Builder for an (optional) null mask
 ///
@@ -134,5 +134,38 @@ impl MaybeNullBufferBuilder {
                 Some(NullBuffer::from(new_builder.finish()))
             }
         }
+    }
+}
+
+pub fn build_nulls_with_buffer<I>(
+    null_iter: I,
+    nulls_len: usize,
+    mut buffer: MutableBuffer,
+) -> (Option<NullBuffer>, Option<MutableBuffer>)
+where
+    I: Iterator<Item = bool>,
+{
+    // Ensure the buffer big enough, and init to all `false`
+    buffer.clear();
+    let bytes_len = bit_util::ceil(nulls_len, 8);
+    buffer.resize(bytes_len, 0);
+
+    let null_slice = buffer.as_slice_mut();
+    let mut has_null = false;
+    null_iter.enumerate().for_each(|(idx, is_valid)| {
+        if is_valid {
+            bit_util::set_bit(null_slice, idx);
+        } else {
+            has_null = true;
+        }
+    });
+
+    if has_null {
+        let bool_buffer = BooleanBuffer::new(buffer.into(), 0, nulls_len);
+        let null_buffer = NullBuffer::new(bool_buffer);
+
+        (Some(null_buffer), None)
+    } else {
+        (None, Some(buffer))
     }
 }
