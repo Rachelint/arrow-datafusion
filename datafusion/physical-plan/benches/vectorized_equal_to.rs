@@ -127,10 +127,13 @@ fn run_bench(c: &mut Criterion, description: &str, nullable: bool, vectorized: b
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    run_bench(c, "### vectorized + nullable", true, true);
-    // run_bench(c, "### vectorized + non-nullable", false, true);
-    // run_bench(c, "### scalarized + nullable", true, false);
-    // run_bench(c, "### scalarized + non-nullable", false, false);
+    let nullable = std::env::var("VEC_EQUAL_TO_NULLABLE").unwrap_or("true".to_string());
+
+    if &nullable == "true" {
+        run_bench(c, "### vectorized + nullable", true, true);
+    } else {
+        run_bench(c, "### vectorized + non-nullable", false, true);
+    }
 }
 
 criterion_group!(benches, criterion_benchmark);
