@@ -88,11 +88,13 @@ where
         };
 
         // Take values
-        let buffer = mem::take(&mut self.exist_values_buffer);
-        let group_values_iter = rows.iter().map(|row| self.group_values[*row].clone());
-        let values = build_values_with_buffer(group_values_iter, buffer);
+        let mut buffer = mem::take(&mut self.exist_values_buffer);
+        buffer.resize(rows.len(), T::default_value());
+        for (idx, &row) in rows.iter().enumerate() {
+            buffer[idx] = self.group_values[row];
+        }
 
-        PrimitiveArray::new(values, nulls)
+        PrimitiveArray::new(ScalarBuffer::from(buffer), nulls)
     }
 
     fn take_from_input_column(
