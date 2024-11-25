@@ -173,10 +173,10 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
 
         // Take rows from exist and input
         let exist_array = self.take_from_exist_column(lhs_rows);
-        let input_array = self.take_from_input_column(array, rhs_rows);
+        // let input_array = self.take_from_input_column(array, rhs_rows);
 
         // Vectorized compare them, and set the results
-        let array_equal_to_result = not_distinct(&exist_array, &input_array)
+        let array_equal_to_result = not_distinct(&exist_array, &array)
             .expect("fail to compare exist and input arrays");
 
         equal_to_results
@@ -191,14 +191,6 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
         if let Some(nulls) = nulls {
             let nulls_buffer = nulls.into_inner().into_inner().into_mutable().unwrap();
             self.exist_nulls_buffer = nulls_buffer;
-        }
-
-        let (_, values, nulls) = input_array.into_parts();
-        let values_buffer = values.into_inner().into_vec().unwrap();
-        self.input_values_buffer = values_buffer;
-        if let Some(nulls) = nulls {
-            let nulls_buffer = nulls.into_inner().into_inner().into_mutable().unwrap();
-            self.input_nulls_buffer = nulls_buffer;
         }
     }
 
