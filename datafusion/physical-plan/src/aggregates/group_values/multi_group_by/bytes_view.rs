@@ -24,7 +24,7 @@ use arrow_array::{Array, ArrayRef, GenericByteViewArray};
 use arrow_buffer::Buffer;
 use itertools::izip;
 use std::marker::PhantomData;
-use std::mem::{replace, size_of};
+use std::mem::{self, replace, size_of};
 use std::sync::Arc;
 
 const BYTE_VIEW_MAX_BLOCK_SIZE: usize = 2 * 1024 * 1024;
@@ -68,6 +68,8 @@ pub struct ByteViewGroupValueBuilder<B: ByteViewType> {
     inline_cnt: usize,
     non_inline_cnt: usize,
 
+    input_non_inlined_indices: Vec<(usize, usize)>,
+
     /// Nulls
     nulls: MaybeNullBufferBuilder,
 
@@ -85,6 +87,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             nulls: MaybeNullBufferBuilder::new(),
             inline_cnt: 0,
             non_inline_cnt: 0,
+            input_non_inlined_indices: Vec::new(),
             _phantom: PhantomData {},
         }
     }
@@ -151,15 +154,26 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         } else {
             None
         };
+        let views = arr.views();
 
         self.views.reserve(rows.len());
+        let mut input_non_inlined_indices =
+            mem::take(&mut self.input_non_inlined_indices);
+        input_non_inlined_indices.clear();
         match all_null_or_non_null {
             None => {
                 for &row in rows {
                     // Null row case, set and return
                     if arr.is_valid(row) {
                         self.nulls.append(false);
-                        self.do_append_val_inner(arr, row);
+
+                        let view = views[row];
+                        let str_len = view as u32;
+
+                        if str_len > 12 {
+                            input_non_inlined_indices.push((self.views.len(), row));
+                        }
+                        self.views.push(view);
                     } else {
                         self.nulls.append(true);
                         self.views.push(0);
@@ -169,9 +183,16 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
 
             Some(true) => {
                 self.nulls.append_n(rows.len(), false);
-                for &row in rows {
-                    self.do_append_val_inner(arr, row);
+
+                let cur_group_view_idx = self.views.len();
+                for (row, view) in arr.views().iter().enumerate() {
+                    let str_len = *view as u32;
+                    if str_len > 12 {
+                        input_non_inlined_indices.push((cur_group_view_idx + row, row));
+                    }
                 }
+
+                self.views.extend_from_slice(arr.views());
             }
 
             Some(false) => {
@@ -180,6 +201,42 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
                 self.views.resize(new_len, 0);
             }
         }
+
+        if !input_non_inlined_indices.is_empty() {
+            for &(lhs_row, rhs_row) in input_non_inlined_indices.iter() {
+                self.fill_non_inlined_view(lhs_row, arr, rhs_row);
+            }
+        }
+
+        self.input_non_inlined_indices = input_non_inlined_indices;
+    }
+
+    fn fill_non_inlined_view(
+        &mut self,
+        lhs_row: usize,
+        array: &GenericByteViewArray<B>,
+        rhs_row: usize,
+    ) where
+        B: ByteViewType,
+    {
+        let value: &[u8] = array.value(rhs_row).as_ref();
+
+        let value_len = value.len();
+        let view = {
+            self.non_inline_cnt += 1;
+            // Ensure big enough block to hold the value firstly
+            self.ensure_in_progress_big_enough(value_len);
+
+            // Append value
+            let buffer_index = self.completed.len();
+            let offset = self.in_progress.len();
+            self.in_progress.extend_from_slice(value);
+
+            make_view(value, buffer_index as u32, offset as u32)
+        };
+
+        // Fill view
+        self.views[lhs_row] = view;
     }
 
     fn do_append_val_inner(&mut self, array: &GenericByteViewArray<B>, row: usize)
@@ -540,7 +597,6 @@ impl<B: ByteViewType> GroupColumn for ByteViewGroupValueBuilder<B> {
     }
 
     fn build(self: Box<Self>) -> ArrayRef {
-        println!("inline num:{}, non inline num:{}", self.inline_cnt, self.non_inline_cnt);
         Self::build_inner(*self)
     }
 
