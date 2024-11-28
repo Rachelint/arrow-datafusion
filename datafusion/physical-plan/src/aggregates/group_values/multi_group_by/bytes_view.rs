@@ -17,7 +17,7 @@
 
 use crate::aggregates::group_values::multi_group_by::{nulls_equal_to, GroupColumn};
 use crate::aggregates::group_values::null_builder::MaybeNullBufferBuilder;
-use arrow::array::{make_view, AsArray, ByteView};
+use arrow::array::{make_view, AsArray, ByteView, StringViewBuilder};
 use arrow::buffer::ScalarBuffer;
 use arrow::datatypes::ByteViewType;
 use arrow_array::{Array, ArrayRef, GenericByteViewArray};
@@ -65,6 +65,9 @@ pub struct ByteViewGroupValueBuilder<B: ByteViewType> {
     /// Currently it is fixed at 2MB.
     max_block_size: usize,
 
+    inline_cnt: usize,
+    non_inline_cnt: usize,
+
     /// Nulls
     nulls: MaybeNullBufferBuilder,
 
@@ -80,6 +83,8 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             completed: Vec::new(),
             max_block_size: BYTE_VIEW_MAX_BLOCK_SIZE,
             nulls: MaybeNullBufferBuilder::new(),
+            inline_cnt: 0,
+            non_inline_cnt: 0,
             _phantom: PhantomData {},
         }
     }
@@ -185,8 +190,10 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
 
         let value_len = value.len();
         let view = if value_len <= 12 {
+            self.inline_cnt += 1;
             make_view(value, 0, 0)
         } else {
+            self.non_inline_cnt += 1;
             // Ensure big enough block to hold the value firstly
             self.ensure_in_progress_big_enough(value_len);
 
@@ -533,6 +540,7 @@ impl<B: ByteViewType> GroupColumn for ByteViewGroupValueBuilder<B> {
     }
 
     fn build(self: Box<Self>) -> ArrayRef {
+        println!("inline num:{}, non inline num:{}", self.inline_cnt, self.non_inline_cnt);
         Self::build_inner(*self)
     }
 
