@@ -185,11 +185,11 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
                 self.nulls.append_n(rows.len(), false);
 
                 let cur_group_view_idx = self.views.len();
-                let inserted_views = rows.iter().map(|&row| {
+                let inserted_views = rows.iter().enumerate().map(|(offset, &row)| {
                     let view = views[row];
                     let str_len = view as u32;
                     if str_len > 12 {
-                        input_non_inlined_indices.push((cur_group_view_idx + row, row));
+                        input_non_inlined_indices.push((cur_group_view_idx + offset, row));
                     }
 
                     view
