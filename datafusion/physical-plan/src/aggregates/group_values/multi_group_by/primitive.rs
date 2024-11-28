@@ -136,8 +136,22 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
             None
         };
 
-        match (NULLABLE, all_null_or_non_null) {
-            (true, None) => {
+        let all_rows_needed = array.len() == rows.len();
+        match (NULLABLE, all_null_or_non_null, all_rows_needed) {
+            (true, None, true) => {
+                self.group_values.reserve(rows.len());
+                for &row in rows {
+                    if array.is_null(row) {
+                        self.nulls.append(true);
+                    } else {
+                        self.nulls.append(false);
+                    }
+                }
+                self.group_values.extend_from_slice(arr.values());
+            }
+
+            (true, None, false) => {
+                self.group_values.reserve(rows.len());
                 for &row in rows {
                     if array.is_null(row) {
                         self.nulls.append(true);
@@ -149,23 +163,30 @@ impl<T: ArrowPrimitiveType, const NULLABLE: bool> GroupColumn
                 }
             }
 
-            (true, Some(true)) => {
+            (true, Some(true), true) => {
                 self.nulls.append_n(rows.len(), false);
-                for &row in rows {
-                    self.group_values.push(arr.value(row));
-                }
+                self.group_values.extend_from_slice(arr.values());
             }
 
-            (true, Some(false)) => {
+            (true, Some(true), false) => {
+                self.nulls.append_n(rows.len(), false);
+                self.group_values
+                    .extend(rows.iter().map(|&row| arr.value(row)));
+            }
+
+            (true, Some(false), _) => {
                 self.nulls.append_n(rows.len(), true);
                 self.group_values
                     .extend(iter::repeat(T::default_value()).take(rows.len()));
             }
 
-            (false, _) => {
-                for &row in rows {
-                    self.group_values.push(arr.value(row));
-                }
+            (false, _, true) => {
+                self.group_values.extend_from_slice(arr.values());
+            }
+
+            (false, _, false) => {
+                self.group_values
+                    .extend(rows.iter().map(|&row| arr.value(row)));
             }
         }
     }

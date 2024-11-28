@@ -147,6 +147,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             None
         };
 
+        self.views.reserve(rows.len());
         match all_null_or_non_null {
             None => {
                 for &row in rows {
