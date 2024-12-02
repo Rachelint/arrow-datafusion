@@ -136,6 +136,8 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
     }
 
     fn vectorized_append_inner(&mut self, array: &ArrayRef, rows: &[usize]) {
+        println!("### pct:{}", rows.len() as f64 / array.len() as f64);
+
         let arr = array.as_byte_view::<B>();
         let null_count = array.null_count();
         let num_rows = array.len();
