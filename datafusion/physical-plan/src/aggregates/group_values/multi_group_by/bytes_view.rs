@@ -68,6 +68,9 @@ pub struct ByteViewGroupValueBuilder<B: ByteViewType> {
     /// Nulls
     nulls: MaybeNullBufferBuilder,
 
+    most_needed_batch_cnt: usize,
+    all_batch_cnt: usize,
+
     /// phantom data so the type requires `<B>`
     _phantom: PhantomData<B>,
 }
@@ -80,6 +83,8 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             completed: Vec::new(),
             max_block_size: BYTE_VIEW_MAX_BLOCK_SIZE,
             nulls: MaybeNullBufferBuilder::new(),
+            most_needed_batch_cnt: 0,
+            all_batch_cnt: 0,
             _phantom: PhantomData {},
         }
     }
@@ -136,7 +141,11 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
     }
 
     fn vectorized_append_inner(&mut self, array: &ArrayRef, rows: &[usize]) {
-        println!("### pct:{}", rows.len() as f64 / array.len() as f64);
+        self.all_batch_cnt += 1;
+
+        if array.len() as f64 * 0.7 < rows.len() as f64 {
+            self.most_needed_batch_cnt += 1;
+        }
 
         let arr = array.as_byte_view::<B>();
         let null_count = array.null_count();
@@ -296,6 +305,9 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
     }
 
     fn build_inner(self) -> ArrayRef {
+        let pct = (self.most_needed_batch_cnt as f64) / (self.all_batch_cnt as f64);
+        println!("### Most rows needed pct:{pct}");
+
         let Self {
             views,
             in_progress,
