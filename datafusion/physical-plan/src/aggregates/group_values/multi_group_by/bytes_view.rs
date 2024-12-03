@@ -169,13 +169,19 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             (None, true) => {
                 let new_buffer_idx_offset = self.completed.len() as u32;
                 self.append_completed_buffers(arr.data_buffers());
-                let input_views = arr.views();
+                let input_raw_views = arr.views();
                 for &row in rows {
                     // Null row case, set and return
                     if arr.is_valid(row) {
                         self.nulls.append(false);
-                        let input_view = ByteView::from(input_views[row]);
-                        self.push_completed_view(input_view, new_buffer_idx_offset);
+                        let input_raw_view = input_raw_views[row];
+                        if input_raw_view as u32 > 12 {
+                            let mut input_view = ByteView::from(input_raw_views[row]);
+                            input_view.buffer_index += new_buffer_idx_offset;
+                            self.views.push(input_view.as_u128());
+                        } else {
+                            self.views.push(input_raw_view)
+                        }
                     } else {
                         self.nulls.append(true);
                         self.views.push(0);
@@ -195,10 +201,16 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
 
                 let new_buffer_idx_offset = self.completed.len() as u32;
                 self.append_completed_buffers(arr.data_buffers());
-                let input_views = arr.views();
+                let input_raw_views = arr.views();
                 for &row in rows {
-                    let input_view = ByteView::from(input_views[row]);
-                    self.push_completed_view(input_view, new_buffer_idx_offset);
+                    let input_raw_view = input_raw_views[row];
+                    if input_raw_view as u32 > 12 {
+                        let mut input_view = ByteView::from(input_raw_views[row]);
+                        input_view.buffer_index += new_buffer_idx_offset;
+                        self.views.push(input_view.as_u128());
+                    } else {
+                        self.views.push(input_raw_view)
+                    }
                 }
             }
 
@@ -208,12 +220,6 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
                 self.views.resize(new_len, 0);
             }
         }
-    }
-
-    #[inline]
-    fn push_completed_view(&mut self, mut view: ByteView, new_buffer_idx_offset: u32) {
-        view.buffer_index += new_buffer_idx_offset;
-        self.views.push(view.as_u128());
     }
 
     fn append_completed_buffers(&mut self, buffers: &[Buffer]) {
