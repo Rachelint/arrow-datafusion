@@ -53,6 +53,8 @@ pub struct ByteViewGroupValueBuilder<B: ByteViewType> {
     /// is not enough(detail can see `max_block_size`).
     in_progress: Vec<u8>,
 
+    in_process_indices: Vec<usize>,
+
     /// The completed blocks
     completed: Vec<Buffer>,
 
@@ -68,9 +70,6 @@ pub struct ByteViewGroupValueBuilder<B: ByteViewType> {
     /// Nulls
     nulls: MaybeNullBufferBuilder,
 
-    most_needed_batch_cnt: usize,
-    all_batch_cnt: usize,
-
     /// phantom data so the type requires `<B>`
     _phantom: PhantomData<B>,
 }
@@ -80,11 +79,10 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         Self {
             views: Vec::new(),
             in_progress: Vec::new(),
+            in_process_indices: Vec::new(),
             completed: Vec::new(),
             max_block_size: BYTE_VIEW_MAX_BLOCK_SIZE,
             nulls: MaybeNullBufferBuilder::new(),
-            most_needed_batch_cnt: 0,
-            all_batch_cnt: 0,
             _phantom: PhantomData {},
         }
     }
@@ -141,12 +139,6 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
     }
 
     fn vectorized_append_inner(&mut self, array: &ArrayRef, rows: &[usize]) {
-        self.all_batch_cnt += 1;
-
-        if array.len() as f64 * 0.7 < rows.len() as f64 {
-            self.most_needed_batch_cnt += 1;
-        }
-
         let arr = array.as_byte_view::<B>();
         let null_count = array.null_count();
         let num_rows = array.len();
@@ -158,8 +150,10 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             None
         };
 
-        match all_null_or_non_null {
-            None => {
+        let most_input_rows_needed = rows.len() > (array.len() as f64 * 0.7) as usize;
+
+        match (all_null_or_non_null, most_input_rows_needed) {
+            (None, false) => {
                 for &row in rows {
                     // Null row case, set and return
                     if arr.is_valid(row) {
@@ -172,18 +166,70 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
                 }
             }
 
-            Some(true) => {
+            (None, true) => {
+                let new_buffer_idx_offset = self.completed.len() as u32;
+                self.append_completed_buffers(arr.data_buffers());
+                let input_views = arr.views();
+                for &row in rows {
+                    // Null row case, set and return
+                    if arr.is_valid(row) {
+                        self.nulls.append(false);
+                        let input_view = ByteView::from(input_views[row]);
+                        self.push_completed_view(input_view, new_buffer_idx_offset);
+                    } else {
+                        self.nulls.append(true);
+                        self.views.push(0);
+                    }
+                }
+            }
+
+            (Some(true), false) => {
                 self.nulls.append_n(rows.len(), false);
                 for &row in rows {
                     self.do_append_val_inner(arr, row);
                 }
             }
 
-            Some(false) => {
+            (Some(true), true) => {
+                self.nulls.append_n(rows.len(), false);
+
+                let new_buffer_idx_offset = self.completed.len() as u32;
+                self.append_completed_buffers(arr.data_buffers());
+                let input_views = arr.views();
+                for &row in rows {
+                    let input_view = ByteView::from(input_views[row]);
+                    self.push_completed_view(input_view, new_buffer_idx_offset);
+                }
+            }
+
+            (Some(false), _) => {
                 self.nulls.append_n(rows.len(), true);
                 let new_len = self.views.len() + rows.len();
                 self.views.resize(new_len, 0);
             }
+        }
+    }
+
+    #[inline]
+    fn push_completed_view(&mut self, mut view: ByteView, new_buffer_idx_offset: u32) {
+        view.buffer_index += new_buffer_idx_offset;
+        self.views.push(view.as_u128());
+    }
+
+    fn append_completed_buffers(&mut self, buffers: &[Buffer]) {
+        // Append buffers
+        self.completed.extend_from_slice(buffers);
+
+        // Shift up views of `in_progress_indices`
+        if self.in_process_indices.is_empty() {
+            return;
+        }
+
+        let new_buffer_idx = self.completed.len() as u32;
+        for &index in &self.in_process_indices {
+            let mut new_view = ByteView::from(self.views[index]);
+            new_view.buffer_index = new_buffer_idx;
+            self.views[index] = new_view.as_u128();
         }
     }
 
@@ -205,6 +251,10 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             let offset = self.in_progress.len();
             self.in_progress.extend_from_slice(value);
 
+            // Record the index included in `in_progress`
+            let group_index = self.views.len();
+            self.in_process_indices.push(group_index);
+
             make_view(value, buffer_index as u32, offset as u32)
         };
 
@@ -224,6 +274,9 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
             );
             let buffer = Buffer::from_vec(flushed_block);
             self.completed.push(buffer);
+
+            // Clear the `in_progress_indices` because their buffer has been flushed
+            self.in_process_indices.clear();
         }
     }
 
@@ -305,9 +358,6 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
     }
 
     fn build_inner(self) -> ArrayRef {
-        let pct = (self.most_needed_batch_cnt as f64) / (self.all_batch_cnt as f64);
-        println!("### Most rows needed pct:{pct}");
-
         let Self {
             views,
             in_progress,
@@ -341,6 +391,7 @@ impl<B: ByteViewType> ByteViewGroupValueBuilder<B> {
         }
     }
 
+    // FIXME
     fn take_n_inner(&mut self, n: usize) -> ArrayRef {
         debug_assert!(self.len() >= n);
 
