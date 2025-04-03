@@ -71,7 +71,6 @@ impl PhysicalOptimizerRule for CoalesceBatches {
                     .downcast_ref::<RepartitionExec>()
                     .map(|repart_exec| {
                         if let Some(aggr) = repart_exec.input()
-                            .children()[0]
                             .as_any()
                             .downcast_ref::<AggregateExec>()
                         {
