@@ -75,7 +75,7 @@ impl PhysicalOptimizerRule for CoalesceBatches {
                             .as_any()
                             .downcast_ref::<AggregateExec>()
                         {
-                            if *aggr.mode() == AggregateMode::FinalPartitioned {
+                            if *aggr.mode() == AggregateMode::Partial {
                                 return false;
                             }
                         }
