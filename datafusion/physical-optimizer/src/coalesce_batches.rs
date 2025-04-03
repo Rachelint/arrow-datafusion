@@ -26,8 +26,12 @@ use datafusion_common::config::ConfigOptions;
 use datafusion_common::error::Result;
 use datafusion_physical_expr::Partitioning;
 use datafusion_physical_plan::{
-    coalesce_batches::CoalesceBatchesExec, filter::FilterExec, joins::HashJoinExec,
-    repartition::RepartitionExec, ExecutionPlan,
+    aggregates::{AggregateExec, AggregateMode},
+    coalesce_batches::CoalesceBatchesExec,
+    filter::FilterExec,
+    joins::HashJoinExec,
+    repartition::RepartitionExec,
+    ExecutionPlan,
 };
 
 use datafusion_common::tree_node::{Transformed, TransformedResult, TreeNode};
@@ -66,6 +70,16 @@ impl PhysicalOptimizerRule for CoalesceBatches {
                 || plan_any
                     .downcast_ref::<RepartitionExec>()
                     .map(|repart_exec| {
+                        if let Some(aggr) = repart_exec.input()
+                            .children()[0]
+                            .as_any()
+                            .downcast_ref::<AggregateExec>()
+                        {
+                            if aggr.mode() == AggregateMode::FinalPartitioned {
+                                return false;
+                            }
+                        }
+
                         !matches!(
                             repart_exec.partitioning().clone(),
                             Partitioning::RoundRobinBatch(_)
