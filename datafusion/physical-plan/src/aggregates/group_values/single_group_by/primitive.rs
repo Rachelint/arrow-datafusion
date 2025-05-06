@@ -366,8 +366,7 @@ where
                             let block_id = O::get_block_id(*g);
                             let block_offset = O::get_block_offset(*g);
                             self.values
-                                .get(block_id as usize)
-                                .unwrap()
+                                .get_unchecked(block_id as usize)
                                 .get_unchecked(block_offset as usize)
                                 .is_eq(key)
                         },
@@ -375,8 +374,7 @@ where
                             let block_id = O::get_block_id(*g);
                             let block_offset = O::get_block_offset(*g);
                             self.values
-                                .get(block_id as usize)
-                                .unwrap()
+                                .get_unchecked(block_id as usize)
                                 .get_unchecked(block_offset as usize)
                                 .hash(state)
                         },
@@ -391,7 +389,10 @@ where
                             // Get block infos and update block,
                             // we need `current block` and `next offset in block`
                             let block_id = self.values.len() as u32 - 1;
-                            let current_block = self.values.last_mut().unwrap();
+                            let current_block = unsafe {
+                                let last_index = self.values.len() - 1;
+                                self.values.get_unchecked_mut(last_index)
+                            }; 
                             let block_offset = current_block.len() as u64;
                             current_block.push(key);
 
