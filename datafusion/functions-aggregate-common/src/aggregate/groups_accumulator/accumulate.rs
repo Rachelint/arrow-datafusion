@@ -23,7 +23,7 @@ use std::fmt::Debug;
 use std::marker::PhantomData;
 
 use arrow::array::{Array, BooleanArray, BooleanBufferBuilder, PrimitiveArray};
-use arrow::buffer::{BooleanBuffer, NullBuffer};
+use arrow::buffer::{BooleanBuffer, MutableBuffer, NullBuffer};
 use arrow::datatypes::ArrowPrimitiveType;
 
 use datafusion_expr_common::groups_accumulator::EmitTo;
@@ -440,13 +440,19 @@ impl Block for BooleanBufferBuilderWrapper {
     }
 
     fn build(block_size: Option<usize>, default_val: bool) -> Self {
-        if let Some(blk_size) = block_size {
-            let mut builder = BooleanBufferBuilder::new(blk_size);
-            builder.append_n(blk_size, default_val);
-            Self(builder)
-        } else {
-            Self(BooleanBufferBuilder::new(0))
-        }
+        let builder = match (block_size, default_val) {
+            (Some(blk_size), true) => {
+                let mut builder = BooleanBufferBuilder::new(blk_size);
+                builder.append_n(blk_size, true);
+                builder
+            }
+            (Some(blk_size), false) => BooleanBufferBuilder::new_from_buffer(
+                MutableBuffer::new_null(blk_size),
+                blk_size,
+            ),
+            (None, _) => BooleanBufferBuilder::new(0),
+        };
+        Self(builder)
     }
 
     fn resize(&mut self, new_len: usize, _default_val: bool) {
