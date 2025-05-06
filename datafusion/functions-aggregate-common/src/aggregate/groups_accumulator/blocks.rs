@@ -44,6 +44,7 @@ pub struct Blocks<B: Block> {
 }
 
 impl<B: Block> Blocks<B> {
+    #[inline]
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
             inner: Vec::new(),
@@ -121,6 +122,7 @@ impl<B: Block> Blocks<B> {
         }
     }
 
+    #[inline]
     pub fn pop_block(&mut self) -> Option<B> {
         if self.next_emit_block_id >= self.inner.len() {
             return None;
@@ -133,18 +135,22 @@ impl<B: Block> Blocks<B> {
         Some(emit_blk)
     }
 
+    #[inline]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
+    #[inline]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
+    #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &B> {
         self.inner.iter()
     }
 
+    #[inline]
     pub fn clear(&mut self) {
         self.inner.clear();
         self.next_emit_block_id = 0;
@@ -154,12 +160,14 @@ impl<B: Block> Blocks<B> {
 impl<B: Block> Index<usize> for Blocks<B> {
     type Output = B;
 
+    #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         &self.inner[index]
     }
 }
 
 impl<B: Block> IndexMut<usize> for Blocks<B> {
+    #[inline]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.inner[index]
     }
