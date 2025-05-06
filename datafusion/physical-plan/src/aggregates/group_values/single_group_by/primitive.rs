@@ -90,7 +90,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     ///
     /// We don't store the hashes as hashing fixed width primitives
     /// is fast enough for this not to benefit performance
-    map: HashTable<u64>,
+    map: HashTable<(u64, u64)>,
 
     /// The group index of the null value if any
     null_group: Option<u64>,
@@ -220,12 +220,13 @@ where
                 );
 
                 let n = n as u64;
-                self.map.retain(|group_idx| {
+                self.map.retain(|bucket| {
                     // Decrement group index by n
+                    let group_idx = bucket.0;
                     match group_idx.checked_sub(n) {
                         // Group index was >= n, shift value down
                         Some(sub) => {
-                            *group_idx = sub;
+                            bucket.0 = sub;
                             true
                         }
                         // Group index was < n, so remove from table
@@ -363,25 +364,20 @@ where
                     let insert = self.map.entry(
                         hash,
                         |g| unsafe {
-                            let block_id = O::get_block_id(*g);
-                            let block_offset = O::get_block_offset(*g);
+                            let block_id = O::get_block_id(g.0);
+                            let block_offset = O::get_block_offset(g.0);
                             self.values
                                 .get_unchecked(block_id as usize)
                                 .get_unchecked(block_offset as usize)
                                 .is_eq(key)
                         },
-                        |g| unsafe {
-                            let block_id = O::get_block_id(*g);
-                            let block_offset = O::get_block_offset(*g);
-                            self.values
-                                .get_unchecked(block_id as usize)
-                                .get_unchecked(block_offset as usize)
-                                .hash(state)
+                        |g| {
+                            g.1
                         },
                     );
 
                     match insert {
-                        hashbrown::hash_table::Entry::Occupied(o) => *o.get(),
+                        hashbrown::hash_table::Entry::Occupied(o) => o.get().0,
                         hashbrown::hash_table::Entry::Vacant(v) => {
                             // Actions before add new group like checking if room is enough
                             before_add_group(&mut self.values);
@@ -398,7 +394,7 @@ where
 
                             // Get group index and finish actions needed it
                             let packed_index = O::pack_index(block_id, block_offset);
-                            v.insert(packed_index);
+                            v.insert((packed_index, hash));
                             packed_index
                         }
                     }
