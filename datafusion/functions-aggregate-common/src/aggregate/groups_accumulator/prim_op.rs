@@ -100,12 +100,8 @@ where
         let values = values[0].as_primitive::<T>();
 
         // Expand to ensure values are large enough
-        let new_block = |block_size: Option<usize>| {
-            let cap = block_size.unwrap_or(DEFAULT_BLOCK_CAP);
-            Vec::with_capacity(cap)
-        };
         self.values
-            .resize(total_num_groups, new_block, self.starting_value);
+            .resize(total_num_groups, self.starting_value);
 
         // NullState dispatches / handles tracking nulls and groups that saw no values
         self.null_state.accumulate(

@@ -109,11 +109,7 @@ impl<O: GroupIndexOperations> NullState<O> {
     {
         // ensure the seen_values is big enough (start everything at
         // "not seen" valid)
-        let new_block = |block_size: Option<usize>| {
-            BooleanBufferBuilderWrapper(BooleanBufferBuilder::new(block_size.unwrap_or(0)))
-        };
-        self.seen_values.resize(total_num_groups, new_block, false);
-
+        self.seen_values.resize(total_num_groups, false);
         let seen_values = &mut self.seen_values;
         accumulate(group_indices, values, opt_filter, |packed_index, value| {
             let packed_index = packed_index as u64;
@@ -149,11 +145,7 @@ impl<O: GroupIndexOperations> NullState<O> {
 
         // ensure the seen_values is big enough (start everything at
         // "not seen" valid)
-        let new_block = |block_size: Option<usize>| {
-            BooleanBufferBuilderWrapper(BooleanBufferBuilder::new(block_size.unwrap_or(0)))
-        };
-        self.seen_values.resize(total_num_groups, new_block, false);
-
+        self.seen_values.resize(total_num_groups, false);
         // These could be made more performant by iterating in chunks of 64 bits at a time
         let seen_values = &mut self.seen_values;
         match (values.null_count() > 0, opt_filter) {
@@ -332,7 +324,7 @@ impl NullStateAdapter {
     fn build_cloned_seen_values(&self) -> BooleanBuffer {
         match self {
             NullStateAdapter::Flat(null_state) => {
-                null_state.seen_values[0].finish_cloned()
+                null_state.seen_values[0].0.finish_cloned()
             }
             NullStateAdapter::Blocked(null_state) => {
                 let mut return_builder = BooleanBufferBuilder::new(0);
@@ -340,7 +332,7 @@ impl NullStateAdapter {
                 for blk_idx in 0..num_blocks {
                     let builder = &null_state.seen_values[blk_idx];
                     for idx in 0..builder.len() {
-                        return_builder.append(builder.get_bit(idx));
+                        return_builder.append(builder.0.get_bit(idx));
                     }
                 }
                 return_builder.finish()
@@ -443,12 +435,22 @@ impl BlockedNullState {
 impl Block for BooleanBufferBuilderWrapper {
     type T = bool;
 
-    fn fill_default_value(&mut self, fill_len: usize, default_value: Self::T) {
-        self.0.append_n(fill_len, default_value);
-    }
-
     fn len(&self) -> usize {
         self.0.len()
+    }
+
+    fn build(block_size: Option<usize>, default_val: bool) -> Self {
+        if let Some(blk_size) = block_size {
+            let mut builder = BooleanBufferBuilder::new(blk_size);
+            builder.append_n(blk_size, default_val);
+            Self(builder)
+        } else {
+            Self(BooleanBufferBuilder::new(0))
+        }
+    }
+
+    fn resize(&mut self, new_len: usize, _default_val: bool) {
+        self.0.resize(new_len);
     }
 }
 
@@ -463,7 +465,9 @@ impl Default for BooleanBufferBuilderWrapper {
 
 impl Blocks<BooleanBufferBuilderWrapper> {
     fn set_bit(&mut self, block_id: u32, block_offset: u64, value: bool) {
-        self[block_id as usize].0.set_bit(block_offset as usize, value);
+        self[block_id as usize]
+            .0
+            .set_bit(block_offset as usize, value);
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> NullBuffer {
