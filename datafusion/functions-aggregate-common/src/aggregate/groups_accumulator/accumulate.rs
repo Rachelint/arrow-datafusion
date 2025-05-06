@@ -67,7 +67,7 @@ pub struct NullState<O: GroupIndexOperations> {
     ///
     /// If `seen_values[i]` is false, have not seen any values that
     /// pass the filter yet for group `i`
-    seen_values: Blocks<BooleanBufferBuilder>,
+    seen_values: Blocks<BooleanBufferBuilderWrapper>,
 
     /// phantom data for required type `<O>`
     _phantom: PhantomData<O>,
@@ -110,7 +110,7 @@ impl<O: GroupIndexOperations> NullState<O> {
         // ensure the seen_values is big enough (start everything at
         // "not seen" valid)
         let new_block = |block_size: Option<usize>| {
-            BooleanBufferBuilder::new(block_size.unwrap_or(0))
+            BooleanBufferBuilderWrapper(BooleanBufferBuilder::new(block_size.unwrap_or(0)))
         };
         self.seen_values.resize(total_num_groups, new_block, false);
 
@@ -150,7 +150,7 @@ impl<O: GroupIndexOperations> NullState<O> {
         // ensure the seen_values is big enough (start everything at
         // "not seen" valid)
         let new_block = |block_size: Option<usize>| {
-            BooleanBufferBuilder::new(block_size.unwrap_or(0))
+            BooleanBufferBuilderWrapper(BooleanBufferBuilder::new(block_size.unwrap_or(0)))
         };
         self.seen_values.resize(total_num_groups, new_block, false);
 
@@ -440,31 +440,40 @@ impl BlockedNullState {
     }
 }
 
-impl Block for BooleanBufferBuilder {
+impl Block for BooleanBufferBuilderWrapper {
     type T = bool;
 
     fn fill_default_value(&mut self, fill_len: usize, default_value: Self::T) {
-        self.append_n(fill_len, default_value);
+        self.0.append_n(fill_len, default_value);
     }
 
     fn len(&self) -> usize {
-        self.len()
+        self.0.len()
     }
 }
 
-impl Blocks<BooleanBufferBuilder> {
+#[derive(Debug)]
+struct BooleanBufferBuilderWrapper(BooleanBufferBuilder);
+
+impl Default for BooleanBufferBuilderWrapper {
+    fn default() -> Self {
+        Self(BooleanBufferBuilder::new(0))
+    }
+}
+
+impl Blocks<BooleanBufferBuilderWrapper> {
     fn set_bit(&mut self, block_id: u32, block_offset: u64, value: bool) {
-        self[block_id as usize].set_bit(block_offset as usize, value);
+        self[block_id as usize].0.set_bit(block_offset as usize, value);
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> NullBuffer {
         let nulls = match emit_to {
-            EmitTo::All | EmitTo::First(_) => self[0].finish(),
+            EmitTo::All | EmitTo::First(_) => self[0].0.finish(),
             EmitTo::NextBlock => {
                 let mut block = self
                     .pop_block()
                     .expect("should not try to emit empty blocks");
-                block.finish()
+                block.0.finish()
             }
         };
 
@@ -476,7 +485,7 @@ impl Blocks<BooleanBufferBuilder> {
             let first_n_null: BooleanBuffer = nulls.iter().take(n).collect();
             // reset the existing seen buffer
             for seen in nulls.iter().skip(n) {
-                self[0].append(seen);
+                self[0].0.append(seen);
             }
             first_n_null
         } else {
@@ -487,7 +496,7 @@ impl Blocks<BooleanBufferBuilder> {
     }
 
     pub fn size(&self) -> usize {
-        self.iter().map(|b| b.capacity()).sum::<usize>()
+        self.iter().map(|b| b.0.capacity()).sum::<usize>()
     }
 }
 

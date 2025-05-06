@@ -38,14 +38,16 @@ use datafusion_expr_common::groups_accumulator::EmitTo;
 ///
 #[derive(Debug)]
 pub struct Blocks<B: Block> {
-    inner: VecDeque<B>,
+    inner: Vec<B>,
+    next_emit_block_id: usize,
     block_size: Option<usize>,
 }
 
 impl<B: Block> Blocks<B> {
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
-            inner: VecDeque::new(),
+            inner: Vec::new(),
+            next_emit_block_id: 0,
             block_size,
         }
     }
@@ -65,7 +67,7 @@ impl<B: Block> Blocks<B> {
         let (mut cur_blk_idx, exist_slots) = if !self.inner.is_empty() {
             let cur_blk_idx = self.inner.len() - 1;
             let exist_slots =
-                (self.inner.len() - 1) * block_size + self.inner.back().unwrap().len();
+                (self.inner.len() - 1) * block_size + self.inner.last().unwrap().len();
 
             (cur_blk_idx, exist_slots)
         } else {
@@ -83,7 +85,7 @@ impl<B: Block> Blocks<B> {
         if new_blks > 0 {
             for _ in 0..new_blks {
                 let block = new_block(self.block_size);
-                self.inner.push_back(block);
+                self.inner.push(block);
             }
         }
 
@@ -113,14 +115,22 @@ impl<B: Block> Blocks<B> {
         let rest_slots = new_slots % block_size;
         if rest_slots > 0 {
             self.inner
-                .back_mut()
+                .last_mut()
                 .unwrap()
                 .fill_default_value(rest_slots, default_value);
         }
     }
 
     pub fn pop_block(&mut self) -> Option<B> {
-        self.inner.pop_front()
+        if self.next_emit_block_id >= self.inner.len() {
+            return None;
+        }
+
+        let emit_block_id = self.next_emit_block_id;
+        let emit_blk = std::mem::take(&mut self.inner[emit_block_id]);
+        self.next_emit_block_id += 1;
+
+        Some(emit_blk)
     }
 
     pub fn len(&self) -> usize {
@@ -137,6 +147,7 @@ impl<B: Block> Blocks<B> {
 
     pub fn clear(&mut self) {
         self.inner.clear();
+        self.next_emit_block_id = 0;
     }
 }
 
@@ -160,7 +171,7 @@ impl<B: Block> IndexMut<usize> for Blocks<B> {
 /// Many types of aggregation intermediate result exist, and we define an interface
 /// to abstract the necessary behaviors of various intermediate result types.
 ///
-pub trait Block: Debug {
+pub trait Block: Debug + Default {
     type T: Clone;
 
     fn fill_default_value(&mut self, fill_len: usize, default_value: Self::T);
@@ -197,8 +208,7 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
                 self.block_size.is_some(),
                 "only support emit next block in blocked groups"
             );
-            self.inner
-                .pop_front()
+            self.pop_block()
                 .expect("should not call emit for empty blocks")
         } else {
             // TODO: maybe remove `EmitTo::take_needed` and move the
