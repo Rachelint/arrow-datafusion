@@ -86,10 +86,13 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     /// The data type of the output array
     data_type: DataType,
 
-    /// Stores the group index based on the hash of its value
+    /// Stores the `(group_index, hash)` based on the hash of its value
     ///
-    /// We don't store the hashes as hashing fixed width primitives
-    /// is fast enough for this not to benefit performance
+    /// We also store `hash` is for reducing cost of rehashing. Such cost
+    /// is obvious in high cardinality group by situation.
+    /// More details can see:
+    /// <https://github.com/apache/datafusion/issues/15961>
+    ///
     map: HashTable<(u64, u64)>,
 
     /// The group index of the null value if any
@@ -164,7 +167,7 @@ where
     }
 
     fn size(&self) -> usize {
-        self.map.capacity() * size_of::<usize>()
+        self.map.capacity() * size_of::<(u64, u64)>()
             + self
                 .values
                 .iter()
