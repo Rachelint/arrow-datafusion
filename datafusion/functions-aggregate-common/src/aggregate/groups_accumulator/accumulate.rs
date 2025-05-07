@@ -121,11 +121,15 @@ impl<O: GroupIndexOperations> NullState<O> {
             value_fn(block_id, block_offset, value);
         });
 
-        println!("############################################");
+        let mut formats = Vec::new();
+        formats.push("##########################################".to_string());
         for t in test {
-            println!("{}, {}", t.0, t.1);
+            formats.push(format!("({}, {})", t.0, t.1));
         }
-        println!("############################################\n");
+        formats.push("##########################################".to_string());
+        let format = formats.join("\n");
+
+        println!("{format}");
     }
 
     /// Invokes `value_fn(group_index, value)` for each non null, non
