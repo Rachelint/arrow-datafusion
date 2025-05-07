@@ -118,16 +118,18 @@ where
             values,
             opt_filter,
             total_num_groups,
-            |block_ids, block_offsets, row_offsets, row_idxs| {
+            |block_ids, block_offsets, row_offsets, val_row_idxs| {
                 let iter = block_ids.iter().zip(row_offsets.windows(2));
                 for (&block_id, row_bound) in iter {
                     let block = &mut self.values[block_id as usize];
-                    (row_bound[0]..row_bound[1]).for_each(|idx| {
-                        let block_offset = block_offsets[idx];
-                        let value = &mut block[block_offset as usize];
-                        let value_row_idx = row_idxs[idx];
-                        (self.prim_fn)(value, data[value_row_idx]);
-                    });
+                    let beg = row_bound[0];
+                    let end = row_bound[1];
+                    let blk_offsets_iter = block_offsets[beg..end].iter();
+                    let val_row_idxs_iter = val_row_idxs[beg..end].iter();
+                    for (&blk_offset, &val_row_idx) in blk_offsets_iter.zip(val_row_idxs_iter) {
+                        let value = &mut block[blk_offset as usize];
+                        (self.prim_fn)(value, data[val_row_idx]);
+                    }
                 }
             },
         );
