@@ -102,14 +102,32 @@ where
             .resize(total_num_groups, self.starting_value);
 
         // NullState dispatches / handles tracking nulls and groups that saw no values
-        self.null_state.accumulate(
+        // self.null_state.accumulate(
+        //     group_indices,
+        //     values,
+        //     opt_filter,
+        //     total_num_groups,
+        //     |block_id, block_offset, new_value| {
+        //         let value = &mut self.values[block_id as usize][block_offset as usize];
+        //         (self.prim_fn)(value, new_value);
+        //     },
+        // );
+        self.null_state.accumulate_blocks(
             group_indices,
             values,
             opt_filter,
             total_num_groups,
-            |block_id, block_offset, new_value| {
-                let value = &mut self.values[block_id as usize][block_offset as usize];
-                (self.prim_fn)(value, new_value);
+            |block_ids, block_offsets, row_offsets, new_values| {
+                let iter = block_ids.iter().zip(row_offsets.windows(2));
+                for (&block_id, row_bound) in iter {
+                    let block = &mut self.values[block_id as usize];
+                    (row_bound[0]..row_bound[1]).for_each(|idx| {
+                        let block_offset = block_offsets[idx];
+                        let value = &mut block[block_offset as usize];
+                        let new_value = new_values[idx];
+                        (self.prim_fn)(value, new_value);
+                    });
+                }
             },
         );
 

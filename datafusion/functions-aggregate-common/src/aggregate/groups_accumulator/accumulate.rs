@@ -21,6 +21,7 @@
 
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::u32;
 
 use arrow::array::{Array, BooleanArray, BooleanBufferBuilder, PrimitiveArray};
 use arrow::buffer::{BooleanBuffer, MutableBuffer, NullBuffer};
@@ -69,6 +70,14 @@ pub struct NullState<O: GroupIndexOperations> {
     /// pass the filter yet for group `i`
     seen_values: Blocks<BooleanBufferBuilderWrapper>,
 
+    block_ids_buffer: Vec<u32>,
+
+    block_offsets_buffer: Vec<u64>,
+
+    row_offset_buffer: Vec<usize>,
+
+    values_buffer: MutableBuffer,
+
     /// phantom data for required type `<O>`
     _phantom: PhantomData<O>,
 }
@@ -111,25 +120,70 @@ impl<O: GroupIndexOperations> NullState<O> {
         // "not seen" valid)
         self.seen_values.resize(total_num_groups, false);
         let seen_values = &mut self.seen_values;
-        let mut test = Vec::new();
         accumulate(group_indices, values, opt_filter, |packed_index, value| {
             let packed_index = packed_index as u64;
             let block_id = O::get_block_id(packed_index);
             let block_offset = O::get_block_offset(packed_index);
-            test.push((block_id, block_offset));
+
             seen_values.set_bit(block_id, block_offset, true);
             value_fn(block_id, block_offset, value);
         });
+    }
 
-        let mut formats = Vec::new();
-        formats.push("##########################################".to_string());
-        for t in test {
-            formats.push(format!("({}, {})", t.0, t.1));
-        }
-        formats.push("##########################################".to_string());
-        let format = formats.join("\n");
+    pub fn accumulate_blocks<T, F>(
+        &mut self,
+        group_indices: &[usize],
+        values: &PrimitiveArray<T>,
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+        mut value_fn: F,
+    ) where
+        T: ArrowPrimitiveType + Send,
+        F: FnMut(&[u32], &[u64], &[usize], &[T::Native]) + Send,
+    {
+        // ensure the seen_values is big enough (start everything at
+        // "not seen" valid)
+        self.seen_values.resize(total_num_groups, false);
+        let seen_values = &mut self.seen_values;
 
-        println!("{format}");
+        let block_ids_buffer = &mut self.block_ids_buffer;
+        let block_offsets_buffer = &mut self.block_offsets_buffer;
+        let row_offset_buffer = &mut self.row_offset_buffer;
+        let values_buffer = &mut self.values_buffer;
+
+        block_ids_buffer.clear();
+        block_offsets_buffer.clear();
+        row_offset_buffer.clear();
+        values_buffer.clear();
+
+        accumulate(group_indices, values, opt_filter, |packed_index, value| {
+            let packed_index = packed_index as u64;
+            let block_id = O::get_block_id(packed_index);
+            let block_offset = O::get_block_offset(packed_index);
+
+            if block_ids_buffer.is_empty()
+                || *block_ids_buffer.last().unwrap() != block_id
+            {
+                block_ids_buffer.push(block_id);
+                row_offset_buffer.push(block_offsets_buffer.len());
+            }
+
+            values_buffer.push(value);
+            block_offsets_buffer.push(block_offset);
+        });
+        row_offset_buffer.push(block_offsets_buffer.len());
+
+        seen_values.set_bits(
+            &block_ids_buffer,
+            &block_offsets_buffer,
+            &row_offset_buffer,
+        );
+        value_fn(
+            &block_ids_buffer,
+            &block_offsets_buffer,
+            &row_offset_buffer,
+            values_buffer.typed_data(),
+        );
     }
 
     /// Invokes `value_fn(group_index, value)` for each non null, non
@@ -288,6 +342,35 @@ impl NullStateAdapter {
         }
     }
 
+    pub fn accumulate_blocks<T, F>(
+        &mut self,
+        group_indices: &[usize],
+        values: &PrimitiveArray<T>,
+        opt_filter: Option<&BooleanArray>,
+        total_num_groups: usize,
+        value_fn: F,
+    ) where
+        T: ArrowPrimitiveType + Send,
+        F: FnMut(&[u32], &[u64], &[usize], &[T::Native]) + Send,
+    {
+        match self {
+            NullStateAdapter::Flat(null_state) => null_state.accumulate_blocks(
+                group_indices,
+                values,
+                opt_filter,
+                total_num_groups,
+                value_fn,
+            ),
+            NullStateAdapter::Blocked(null_state) => null_state.accumulate_blocks(
+                group_indices,
+                values,
+                opt_filter,
+                total_num_groups,
+                value_fn,
+            ),
+        }
+    }
+
     pub fn accumulate_boolean<F>(
         &mut self,
         group_indices: &[usize],
@@ -407,6 +490,10 @@ impl Default for FlatNullState {
     fn default() -> Self {
         Self {
             seen_values: Blocks::new(None),
+            block_ids_buffer: Vec::new(),
+            block_offsets_buffer: Vec::new(),
+            row_offset_buffer: Vec::new(),
+            values_buffer: MutableBuffer::new(0),
             _phantom: PhantomData {},
         }
     }
@@ -439,6 +526,10 @@ impl BlockedNullState {
     pub fn new(block_size: usize) -> Self {
         Self {
             seen_values: Blocks::new(Some(block_size)),
+            block_ids_buffer: Vec::new(),
+            block_offsets_buffer: Vec::new(),
+            row_offset_buffer: Vec::new(),
+            values_buffer: MutableBuffer::new(0),
             _phantom: PhantomData {},
         }
     }
@@ -486,6 +577,22 @@ impl Blocks<BooleanBufferBuilderWrapper> {
         self[block_id as usize]
             .0
             .set_bit(block_offset as usize, value);
+    }
+
+    fn set_bits(
+        &mut self,
+        block_ids: &[u32],
+        block_offsets: &[u64],
+        row_offsets: &[usize],
+    ) {
+        let iter = block_ids.iter().zip(row_offsets.windows(2));
+        for (&block_id, row_bound) in iter {
+            let block = &mut self[block_id as usize];
+            (row_bound[0]..row_bound[1]).for_each(|idx| {
+                let block_offset = block_offsets[idx];
+                block.0.set_bit(block_offset as usize, true);
+            });
+        }
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> NullBuffer {
