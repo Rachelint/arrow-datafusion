@@ -111,13 +111,21 @@ impl<O: GroupIndexOperations> NullState<O> {
         // "not seen" valid)
         self.seen_values.resize(total_num_groups, false);
         let seen_values = &mut self.seen_values;
+        let mut test = Vec::new();
         accumulate(group_indices, values, opt_filter, |packed_index, value| {
             let packed_index = packed_index as u64;
             let block_id = O::get_block_id(packed_index);
             let block_offset = O::get_block_offset(packed_index);
+            test.push((block_id, block_offset));
             seen_values.set_bit(block_id, block_offset, true);
             value_fn(block_id, block_offset, value);
         });
+
+        println!("############################################");
+        for t in test {
+            println!("{}, {}", t.0, t.1);
+        }
+        println!("############################################\n");
     }
 
     /// Invokes `value_fn(group_index, value)` for each non null, non
