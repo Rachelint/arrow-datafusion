@@ -24,6 +24,7 @@ use std::{
     ops::{Index, IndexMut},
 };
 
+use arrow::buffer::ScalarBuffer;
 use datafusion_expr_common::groups_accumulator::EmitTo;
 
 /// Structure used to store aggregation intermediate results in `blocked approach`
@@ -39,9 +40,15 @@ use datafusion_expr_common::groups_accumulator::EmitTo;
 #[derive(Debug)]
 pub struct Blocks<B: Block> {
     inner: Vec<B>,
+
+    // Used block, capacity is inner.len
+    cur_len: usize,
+
+    block_size: Option<usize>,
+
+    // Emit buffer
     next_emit_block_id: usize,
     last_block_len: usize,
-    block_size: Option<usize>,
 }
 
 impl<B: Block> Blocks<B> {
@@ -49,27 +56,47 @@ impl<B: Block> Blocks<B> {
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
             inner: Vec::new(),
+            cur_len: 0,
+            block_size,
             next_emit_block_id: 0,
             last_block_len: 0,
-            block_size,
         }
     }
 
     pub fn resize(&mut self, total_num_groups: usize, default_val: B::T) {
-        if let Some(block_size) = self.block_size {
-            let blocks_cap = self.inner.len() * block_size;
-            if blocks_cap < total_num_groups {
-                let allocated_blocks =
-                    (total_num_groups - blocks_cap).div_ceil(block_size);
+        if let Some(blk_size) = self.block_size {
+            // 1. Judge if the len is enough
+            // 2. Judge if the cap is enough
+            //   2.1 If enough, just advance the `cur_len`
+            //   2.2 If not enough, expand cap to 1.5 * needed
+            let needed_blocks = total_num_groups.div_ceil(blk_size);
+
+            loop {
+                if self.cur_len >= needed_blocks {
+                    break;
+                }
+
+                // 2. Judge if the cap is enough
+                // 2.1 If enough, just advance the `cur_len`
+                if self.inner.len() >= needed_blocks {
+                    self.cur_len = needed_blocks;
+                    break;
+                }
+
+                // 2.2 If not enough, expand cap to 1.5 * needed
+                let reserved_blocks = (needed_blocks as f64 * 1.5) as usize;
+                let allocated_blocks = reserved_blocks - self.inner.len();
                 self.inner.extend(
                     iter::repeat_with(|| B::build(self.block_size, default_val.clone()))
                         .take(allocated_blocks),
                 );
             }
-            self.last_block_len = block_size + total_num_groups - self.inner.len() * block_size;
+
+            self.last_block_len = blk_size + total_num_groups - self.cur_len * blk_size;
         } else {
             if self.is_empty() {
-                self.inner.push(B::build(self.block_size, default_val.clone()));
+                self.inner
+                    .push(B::build(self.block_size, default_val.clone()));
             }
             let single_block = self.inner.last_mut().unwrap();
             single_block.resize(total_num_groups, default_val.clone());
@@ -78,7 +105,7 @@ impl<B: Block> Blocks<B> {
 
     #[inline]
     pub fn pop_block(&mut self) -> Option<B> {
-        if self.next_emit_block_id >= self.inner.len() {
+        if self.next_emit_block_id >= self.cur_len {
             return None;
         }
 
@@ -86,7 +113,7 @@ impl<B: Block> Blocks<B> {
         let mut emit_blk = std::mem::take(&mut self.inner[emit_block_id]);
         self.next_emit_block_id += 1;
 
-        if self.next_emit_block_id == self.inner.len() {
+        if self.next_emit_block_id == self.cur_len {
             emit_blk.resize(self.last_block_len, B::T::default());
         }
 
@@ -111,7 +138,9 @@ impl<B: Block> Blocks<B> {
     #[inline]
     pub fn clear(&mut self) {
         self.inner.clear();
+        self.cur_len = 0;
         self.next_emit_block_id = 0;
+        self.last_block_len = 0;
     }
 }
 
