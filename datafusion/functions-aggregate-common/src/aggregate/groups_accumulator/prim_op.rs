@@ -112,20 +112,21 @@ where
         //         (self.prim_fn)(value, new_value);
         //     },
         // );
+        let data = values.values();
         self.null_state.accumulate_blocks(
             group_indices,
             values,
             opt_filter,
             total_num_groups,
-            |block_ids, block_offsets, row_offsets, new_values| {
+            |block_ids, block_offsets, row_offsets, row_idxs| {
                 let iter = block_ids.iter().zip(row_offsets.windows(2));
                 for (&block_id, row_bound) in iter {
                     let block = &mut self.values[block_id as usize];
                     (row_bound[0]..row_bound[1]).for_each(|idx| {
                         let block_offset = block_offsets[idx];
                         let value = &mut block[block_offset as usize];
-                        let new_value = new_values[idx];
-                        (self.prim_fn)(value, new_value);
+                        let value_row_idx = row_idxs[idx];
+                        (self.prim_fn)(value, data[value_row_idx]);
                     });
                 }
             },

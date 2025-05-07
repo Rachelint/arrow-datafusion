@@ -76,7 +76,7 @@ pub struct NullState<O: GroupIndexOperations> {
 
     row_offset_buffer: Vec<usize>,
 
-    values_buffer: MutableBuffer,
+    row_idxs_buffer: Vec<usize>,
 
     /// phantom data for required type `<O>`
     _phantom: PhantomData<O>,
@@ -139,7 +139,7 @@ impl<O: GroupIndexOperations> NullState<O> {
         mut value_fn: F,
     ) where
         T: ArrowPrimitiveType + Send,
-        F: FnMut(&[u32], &[u64], &[usize], &[T::Native]) + Send,
+        F: FnMut(&[u32], &[u64], &[usize], &[usize]) + Send,
     {
         // ensure the seen_values is big enough (start everything at
         // "not seen" valid)
@@ -149,14 +149,14 @@ impl<O: GroupIndexOperations> NullState<O> {
         let block_ids_buffer = &mut self.block_ids_buffer;
         let block_offsets_buffer = &mut self.block_offsets_buffer;
         let row_offset_buffer = &mut self.row_offset_buffer;
-        let values_buffer = &mut self.values_buffer;
+        let row_idxs_buffer = &mut self.row_idxs_buffer;
 
         block_ids_buffer.clear();
         block_offsets_buffer.clear();
         row_offset_buffer.clear();
-        values_buffer.clear();
+        row_idxs_buffer.clear();
 
-        accumulate(group_indices, values, opt_filter, |packed_index, value| {
+        accumulate_blocks(group_indices, values, opt_filter, |packed_index, row_idx| {
             let packed_index = packed_index as u64;
             let block_id = O::get_block_id(packed_index);
             let block_offset = O::get_block_offset(packed_index);
@@ -168,7 +168,7 @@ impl<O: GroupIndexOperations> NullState<O> {
                 row_offset_buffer.push(block_offsets_buffer.len());
             }
 
-            values_buffer.push(value);
+            row_idxs_buffer.push(row_idx);
             block_offsets_buffer.push(block_offset);
         });
         row_offset_buffer.push(block_offsets_buffer.len());
@@ -182,7 +182,7 @@ impl<O: GroupIndexOperations> NullState<O> {
             &block_ids_buffer,
             &block_offsets_buffer,
             &row_offset_buffer,
-            values_buffer.typed_data(),
+            &row_idxs_buffer,
         );
     }
 
@@ -351,7 +351,7 @@ impl NullStateAdapter {
         value_fn: F,
     ) where
         T: ArrowPrimitiveType + Send,
-        F: FnMut(&[u32], &[u64], &[usize], &[T::Native]) + Send,
+        F: FnMut(&[u32], &[u64], &[usize], &[usize]) + Send,
     {
         match self {
             NullStateAdapter::Flat(null_state) => null_state.accumulate_blocks(
@@ -493,7 +493,7 @@ impl Default for FlatNullState {
             block_ids_buffer: Vec::new(),
             block_offsets_buffer: Vec::new(),
             row_offset_buffer: Vec::new(),
-            values_buffer: MutableBuffer::new(0),
+            row_idxs_buffer: Vec::new(),
             _phantom: PhantomData {},
         }
     }
@@ -529,7 +529,7 @@ impl BlockedNullState {
             block_ids_buffer: Vec::new(),
             block_offsets_buffer: Vec::new(),
             row_offset_buffer: Vec::new(),
-            values_buffer: MutableBuffer::new(0),
+            row_idxs_buffer: Vec::new(),
             _phantom: PhantomData {},
         }
     }
@@ -760,6 +760,103 @@ pub fn accumulate<T, F>(
                     if let Some(true) = filter_value {
                         if let Some(new_value) = new_value {
                             value_fn(group_index, new_value)
+                        }
+                    }
+                })
+        }
+    }
+}
+
+pub fn accumulate_blocks<T, F>(
+    group_indices: &[usize],
+    values: &PrimitiveArray<T>,
+    opt_filter: Option<&BooleanArray>,
+    mut value_fn: F,
+) where
+    T: ArrowPrimitiveType + Send,
+    F: FnMut(usize, usize) + Send,
+{
+    let data: &[T::Native] = values.values();
+    assert_eq!(data.len(), group_indices.len());
+
+    match (values.null_count() > 0, opt_filter) {
+        // no nulls, no filter,
+        (false, None) => {
+            for (row_idx, &group_index) in group_indices.iter().enumerate() {
+                value_fn(group_index, row_idx);
+            }
+        }
+        // nulls, no filter
+        (true, None) => {
+            let nulls = values.nulls().unwrap();
+            // This is based on (ahem, COPY/PASTE) arrow::compute::aggregate::sum
+            // iterate over in chunks of 64 bits for more efficient null checking
+            let group_indices_chunks = group_indices.chunks_exact(64);
+            let bit_chunks = nulls.inner().bit_chunks();
+            let group_indices_remainder = group_indices_chunks.remainder();
+
+            let mut row_idx = 0;
+            group_indices_chunks.zip(bit_chunks.iter()).for_each(
+                |(group_index_chunk, mask)| {
+                    // index_mask has value 1 << i in the loop
+                    let mut index_mask = 1;
+                    group_index_chunk.iter().for_each(|&group_index| {
+                        // valid bit was set, real value
+                        let is_valid = (mask & index_mask) != 0;
+                        if is_valid {
+                            value_fn(group_index, row_idx);
+                        }
+                        index_mask <<= 1;
+                        row_idx += 1;
+                    })
+                },
+            );
+
+            // handle any remaining bits (after the initial 64)
+            let remainder_bits = bit_chunks.remainder_bits();
+            group_indices_remainder
+                .iter()
+                .enumerate()
+                .for_each(|(i, &group_index)| {
+                    let is_valid = remainder_bits & (1 << i) != 0;
+                    if is_valid {
+                        value_fn(group_index, row_idx);
+                    }
+                    row_idx += 1;
+                });
+        }
+
+        // no nulls, but a filter
+        (false, Some(filter)) => {
+            assert_eq!(filter.len(), group_indices.len());
+            // The performance with a filter could be improved by
+            // iterating over the filter in chunks, rather than a single
+            // iterator. TODO file a ticket
+            group_indices
+                .iter()
+                .zip(filter.iter())
+                .enumerate()
+                .for_each(|(row_idx, (&group_index, filter_value))| {
+                    if let Some(true) = filter_value {
+                        value_fn(group_index, row_idx);
+                    }
+                })
+        }
+
+        // both null values and filters
+        (true, Some(filter)) => {
+            assert_eq!(filter.len(), group_indices.len());
+            // The performance with a filter could be improved by
+            // iterating over the filter in chunks, rather than using
+            // iterators. TODO file a ticket
+            filter
+                .iter()
+                .zip(group_indices.iter())
+                .enumerate()
+                .for_each(|(row_idx, (filter_value, &group_index))| {
+                    if let Some(true) = filter_value {
+                        if values.is_null(row_idx) {
+                            value_fn(group_index, row_idx)
                         }
                     }
                 })
