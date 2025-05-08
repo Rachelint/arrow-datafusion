@@ -118,19 +118,17 @@ impl<O: GroupIndexOperations> NullState<O> {
         mut value_fn: F,
     ) where
         T: ArrowPrimitiveType + Send,
-        F: FnMut(u32, u64, T::Native) + Send,
+        F: FnMut(usize, usize, T::Native) + Send,
     {
         // ensure the seen_values is big enough (start everything at
         // "not seen" valid)
         let seen_values =
             initialize_builder(&mut self.seen_values, total_num_groups, false);
         let block_size = self.block_size.unwrap_or_default();
-        accumulate(group_indices, values, opt_filter, |packed_index, value| {
-            let packed_index = packed_index as u64;
-            let block_id = O::get_block_id(packed_index);
-            let block_offset = O::get_block_offset(packed_index);
-            let flat_index = O::get_flat_index(block_id, block_offset, block_size);
-            seen_values.set_bit(flat_index, false);
+        accumulate(group_indices, values, opt_filter, |group_index, value| {
+            let block_id = O::get_block_id(group_index, block_size);
+            let block_offset = O::get_block_offset(group_index, block_size);
+            seen_values.set_bit(group_index, false);
             value_fn(block_id, block_offset, value);
         });
     }
@@ -153,7 +151,7 @@ impl<O: GroupIndexOperations> NullState<O> {
         total_num_groups: usize,
         mut value_fn: F,
     ) where
-        F: FnMut(u32, u64, bool) + Send,
+        F: FnMut(usize, usize, bool) + Send,
     {
         let data = values.values();
         assert_eq!(data.len(), group_indices.len());
@@ -170,13 +168,10 @@ impl<O: GroupIndexOperations> NullState<O> {
                 // if we have previously seen nulls, ensure the null
                 // buffer is big enough (start everything at valid)
                 group_indices.iter().zip(data.iter()).for_each(
-                    |(&packed_index, new_value)| {
-                        let packed_index = packed_index as u64;
-                        let block_id = O::get_block_id(packed_index);
-                        let block_offset = O::get_block_offset(packed_index);
-                        let flat_index =
-                            O::get_flat_index(block_id, block_offset, block_size);
-                        seen_values.set_bit(flat_index, true);
+                    |(&group_index, new_value)| {
+                        let block_id = O::get_block_id(group_index, block_size);
+                        let block_offset = O::get_block_offset(group_index, block_size);
+                        seen_values.set_bit(group_index, false);
                         value_fn(block_id, block_offset, new_value)
                     },
                 )
@@ -188,14 +183,11 @@ impl<O: GroupIndexOperations> NullState<O> {
                     .iter()
                     .zip(data.iter())
                     .zip(nulls.iter())
-                    .for_each(|((&packed_index, new_value), is_valid)| {
+                    .for_each(|((&group_index, new_value), is_valid)| {
                         if is_valid {
-                            let packed_index = packed_index as u64;
-                            let block_id = O::get_block_id(packed_index);
-                            let block_offset = O::get_block_offset(packed_index);
-                            let flat_index =
-                                O::get_flat_index(block_id, block_offset, block_size);
-                            seen_values.set_bit(flat_index, true);
+                            let block_id = O::get_block_id(group_index, block_size);
+                            let block_offset = O::get_block_offset(group_index, block_size);
+                            seen_values.set_bit(group_index, false);
                             value_fn(block_id, block_offset, new_value);
                         }
                     })
@@ -208,14 +200,11 @@ impl<O: GroupIndexOperations> NullState<O> {
                     .iter()
                     .zip(data.iter())
                     .zip(filter.iter())
-                    .for_each(|((&packed_index, new_value), filter_value)| {
+                    .for_each(|((&group_index, new_value), filter_value)| {
                         if let Some(true) = filter_value {
-                            let packed_index = packed_index as u64;
-                            let block_id = O::get_block_id(packed_index);
-                            let block_offset = O::get_block_offset(packed_index);
-                            let flat_index =
-                                O::get_flat_index(block_id, block_offset, block_size);
-                            seen_values.set_bit(flat_index, true);
+                            let block_id = O::get_block_id(group_index, block_size);
+                            let block_offset = O::get_block_offset(group_index, block_size);
+                            seen_values.set_bit(group_index, false);
                             value_fn(block_id, block_offset, new_value);
                         }
                     })
@@ -227,15 +216,12 @@ impl<O: GroupIndexOperations> NullState<O> {
                     .iter()
                     .zip(group_indices.iter())
                     .zip(values.iter())
-                    .for_each(|((filter_value, &packed_index), new_value)| {
+                    .for_each(|((filter_value, &group_index), new_value)| {
                         if let Some(true) = filter_value {
                             if let Some(new_value) = new_value {
-                                let packed_index = packed_index as u64;
-                                let block_id = O::get_block_id(packed_index);
-                                let block_offset = O::get_block_offset(packed_index);
-                                let flat_index =
-                                    O::get_flat_index(block_id, block_offset, block_size);
-                                seen_values.set_bit(flat_index, true);
+                                let block_id = O::get_block_id(group_index, block_size);
+                                let block_offset = O::get_block_offset(group_index, block_size);
+                                seen_values.set_bit(group_index, false);
                                 value_fn(block_id, block_offset, new_value);
                             }
                         }
@@ -287,7 +273,7 @@ impl NullStateAdapter {
         value_fn: F,
     ) where
         T: ArrowPrimitiveType + Send,
-        F: FnMut(u32, u64, T::Native) + Send,
+        F: FnMut(usize, usize, T::Native) + Send,
     {
         match self {
             NullStateAdapter::Flat(null_state) => null_state.accumulate(
@@ -315,7 +301,7 @@ impl NullStateAdapter {
         total_num_groups: usize,
         value_fn: F,
     ) where
-        F: FnMut(u32, u64, bool) + Send,
+        F: FnMut(usize, usize, bool) + Send,
     {
         match self {
             NullStateAdapter::Flat(null_state) => null_state.accumulate_boolean(
@@ -434,9 +420,7 @@ impl Default for FlatNullState {
 impl FlatNullState {
     pub fn build(&mut self, emit_to: EmitTo) -> NullBuffer {
         match emit_to {
-            EmitTo::All => {
-                NullBuffer::new(self.seen_values.finish())
-            }
+            EmitTo::All => NullBuffer::new(self.seen_values.finish()),
             EmitTo::First(n) => {
                 // split off the first N values in seen_values
                 //

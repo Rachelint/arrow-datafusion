@@ -258,7 +258,6 @@ impl GroupsAccumulator for GeometricMeanGroupsAccumulator {
             opt_filter,
             total_num_groups,
             |_, group_index, new_value| {
-                let group_index = group_index as usize;
                 let prod = &mut self.prods[group_index];
                 *prod = prod.mul_wrapping(new_value);
 

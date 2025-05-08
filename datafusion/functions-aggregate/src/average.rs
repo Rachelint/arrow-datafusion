@@ -589,7 +589,6 @@ where
             opt_filter,
             total_num_groups,
             |_, group_index, new_value| {
-                let group_index = group_index as usize;
                 let sum = &mut self.sums[group_index];
                 *sum = sum.add_wrapping(new_value);
 

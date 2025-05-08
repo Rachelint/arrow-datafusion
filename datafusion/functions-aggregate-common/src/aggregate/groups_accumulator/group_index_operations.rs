@@ -49,33 +49,21 @@ use std::fmt::Debug;
 /// that is for compatible for `flat group index`'s parsing.
 ///
 pub trait GroupIndexOperations: Debug {
-    fn pack_index(block_id: u32, block_offset: u64) -> u64;
+    fn get_block_id(group_index: usize, block_size: usize) -> usize;
 
-    fn get_block_id(packed_index: u64) -> u32;
-
-    fn get_block_offset(packed_index: u64) -> u64;
-
-    fn get_flat_index(block_id: u32, block_offset: u64, block_size: usize) -> usize;
+    fn get_block_offset(group_index: usize, block_size: usize) -> usize;
 }
 
 #[derive(Debug)]
 pub struct BlockedGroupIndexOperations;
 
 impl GroupIndexOperations for BlockedGroupIndexOperations {
-    fn pack_index(block_id: u32, block_offset: u64) -> u64 {
-        ((block_id as u64) << 32) | block_offset
+    fn get_block_id(group_index: usize, block_size: usize) -> usize {
+        group_index / block_size
     }
 
-    fn get_block_id(packed_index: u64) -> u32 {
-        (packed_index >> 32) as u32
-    }
-
-    fn get_block_offset(packed_index: u64) -> u64 {
-        (packed_index as u32) as u64
-    }
-
-    fn get_flat_index(block_id: u32, block_offset: u64, block_size: usize) -> usize {
-        block_id as usize * block_size + block_offset as usize
+    fn get_block_offset(group_index: usize, block_size: usize) -> usize {
+        group_index % block_size
     }
 }
 
@@ -83,19 +71,11 @@ impl GroupIndexOperations for BlockedGroupIndexOperations {
 pub struct FlatGroupIndexOperations;
 
 impl GroupIndexOperations for FlatGroupIndexOperations {
-    fn pack_index(_block_id: u32, block_offset: u64) -> u64 {
-        block_offset
-    }
-
-    fn get_block_id(_packed_index: u64) -> u32 {
+    fn get_block_id(_group_index: usize, _block_size: usize) -> usize {
         0
     }
 
-    fn get_block_offset(packed_index: u64) -> u64 {
-        packed_index
-    }
-
-    fn get_flat_index(_block_id: u32, block_offset: u64, _block_size: usize) -> usize {
-        block_offset as usize
+    fn get_block_offset(group_index: usize, _block_size: usize) -> usize {
+        group_index
     }
 }

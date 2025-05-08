@@ -95,7 +95,6 @@ where
             opt_filter,
             total_num_groups,
             |_, group_index, new_value| {
-                let group_index = group_index as usize;
                 let current_value = self.values.get_bit(group_index);
                 let value = (self.bool_fn)(current_value, new_value);
                 self.values.set_bit(group_index, value);

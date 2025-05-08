@@ -93,10 +93,10 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     /// More details can see:
     /// <https://github.com/apache/datafusion/issues/15961>
     ///
-    map: HashTable<(u64, u64)>,
+    map: HashTable<(usize, u64)>,
 
     /// The group index of the null value if any
-    null_group: Option<u64>,
+    null_group: Option<usize>,
 
     /// The values for each group index
     values: Vec<Vec<T::Native>>,
@@ -115,6 +115,8 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     ///     `Vec` if of `blk_size` len, and we call it a `block`
     ///
     block_size: Option<usize>,
+
+    num_groups: usize,
 }
 
 impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
@@ -134,6 +136,7 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             null_group: None,
             random_state: Default::default(),
             block_size: None,
+            num_groups: 0,
         }
     }
 }
@@ -180,7 +183,8 @@ where
     }
 
     fn len(&self) -> usize {
-        self.values.iter().map(|block| block.len()).sum::<usize>()
+        self.num_groups
+        // self.values.iter().map(|block| block.len()).sum::<usize>()
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
@@ -222,7 +226,6 @@ where
                     "only support EmitTo::First in flat mode"
                 );
 
-                let n = n as u64;
                 self.map.retain(|bucket| {
                     // Decrement group index by n
                     let group_idx = bucket.0;
@@ -256,10 +259,9 @@ where
             // Emitting in blocked mode
             // ===============================================
             EmitTo::NextBlock => {
-                assert!(
-                    self.block_size.is_some(),
-                    "only support EmitTo::Next in blocked group values"
-                );
+                let block_size = self
+                    .block_size
+                    .expect("only support EmitTo::Next in blocked group values");
 
                 // Similar as `EmitTo:All`, we will clear the old index infos both
                 // in `map` and `null_group`
@@ -271,10 +273,16 @@ where
                 self.next_emit_block_id += 1;
 
                 // Check if `null` is in current block
-                let null_block_pair_opt = self.null_group.map(|packed_idx| {
+                let null_block_pair_opt = self.null_group.map(|group_index| {
                     (
-                        BlockedGroupIndexOperations::get_block_id(packed_idx),
-                        BlockedGroupIndexOperations::get_block_offset(packed_idx),
+                        BlockedGroupIndexOperations::get_block_id(
+                            group_index,
+                            block_size,
+                        ),
+                        BlockedGroupIndexOperations::get_block_offset(
+                            group_index,
+                            block_size,
+                        ),
                     )
                 });
                 let null_idx = match null_block_pair_opt {
@@ -288,6 +296,7 @@ where
             }
         };
 
+        self.num_groups -= array.len();
         Ok(vec![Arc::new(array.with_data_type(self.data_type.clone()))])
     }
 
@@ -301,10 +310,15 @@ where
             let single_block = self.values.last_mut().unwrap();
             single_block.clear();
             single_block.shrink_to(count);
+        } else {
+            self.values.clear();
         }
 
         self.map.clear();
         self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
+        self.null_group = None;
+        self.next_emit_block_id = 0;
+        self.num_groups = 0;
     }
 
     fn supports_blocked_groups(&self) -> bool {
@@ -317,6 +331,7 @@ where
         self.null_group = None;
         self.block_size = block_size;
         self.next_emit_block_id = 0;
+        self.num_groups = 0;
 
         // As mentioned above, we ensure the `single block` always exist
         // in `flat mode`
@@ -345,6 +360,7 @@ where
         assert_eq!(cols.len(), 1);
         groups.clear();
 
+        let block_size = self.block_size.unwrap_or_default();
         for v in cols[0].as_primitive::<T>() {
             let group_index = match v {
                 None => *self.null_group.get_or_insert_with(|| {
@@ -353,13 +369,15 @@ where
 
                     // Get block infos and update block,
                     // we need `current block` and `next offset in block`
-                    let block_id = self.values.len() as u32 - 1;
                     let current_block = self.values.last_mut().unwrap();
-                    let block_offset = current_block.len() as u64;
                     current_block.push(Default::default());
 
+                    // Compute group index
+                    let group_index = self.num_groups;
+                    self.num_groups += 1;
+
                     // Get group index and finish actions needed it
-                    O::pack_index(block_id, block_offset)
+                    group_index
                 }),
                 Some(key) => {
                     let state = &self.random_state;
@@ -367,16 +385,14 @@ where
                     let insert = self.map.entry(
                         hash,
                         |g| unsafe {
-                            let block_id = O::get_block_id(g.0);
-                            let block_offset = O::get_block_offset(g.0);
+                            let block_id = O::get_block_id(g.0, block_size);
+                            let block_offset = O::get_block_offset(g.0, block_size);
                             self.values
-                                .get_unchecked(block_id as usize)
-                                .get_unchecked(block_offset as usize)
+                                .get_unchecked(block_id)
+                                .get_unchecked(block_offset)
                                 .is_eq(key)
                         },
-                        |g| {
-                            g.1
-                        },
+                        |g| g.1,
                     );
 
                     match insert {
@@ -387,23 +403,21 @@ where
 
                             // Get block infos and update block,
                             // we need `current block` and `next offset in block`
-                            let block_id = self.values.len() as u32 - 1;
-                            let current_block = unsafe {
-                                let last_index = self.values.len() - 1;
-                                self.values.get_unchecked_mut(last_index)
-                            }; 
-                            let block_offset = current_block.len() as u64;
+                            let current_block = self.values.last_mut().unwrap();
                             current_block.push(key);
 
-                            // Get group index and finish actions needed it
-                            let packed_index = O::pack_index(block_id, block_offset);
-                            v.insert((packed_index, hash));
-                            packed_index
+                            // Compute group index
+                            let group_index = self.num_groups;
+                            self.num_groups += 1;
+
+                            v.insert((group_index, hash));
+                            group_index
                         }
                     }
                 }
             };
-            groups.push(group_index as usize)
+
+            groups.push(group_index)
         }
         Ok(())
     }
@@ -532,10 +546,11 @@ mod tests {
             .unwrap();
 
         let mut expected = BTreeMap::new();
-        for (&packed_index, value) in group_indices.iter().zip(data1.iter()) {
-            let block_id = BlockedGroupIndexOperations::get_block_id(packed_index as u64);
+        for (&group_index, value) in group_indices.iter().zip(data1.iter()) {
+            let block_id =
+                BlockedGroupIndexOperations::get_block_id(group_index, block_size);
             let block_offset =
-                BlockedGroupIndexOperations::get_block_offset(packed_index as u64);
+                BlockedGroupIndexOperations::get_block_offset(group_index, block_size);
             let flatten_index = block_id as usize * block_size + block_offset as usize;
             expected.insert(flatten_index, value);
         }
@@ -557,10 +572,11 @@ mod tests {
             .unwrap();
 
         let mut expected = BTreeMap::new();
-        for (&packed_index, value) in group_indices.iter().zip(data2.iter()) {
-            let block_id = BlockedGroupIndexOperations::get_block_id(packed_index as u64);
+        for (&group_index, value) in group_indices.iter().zip(data2.iter()) {
+            let block_id =
+                BlockedGroupIndexOperations::get_block_id(group_index, block_size);
             let block_offset =
-                BlockedGroupIndexOperations::get_block_offset(packed_index as u64);
+                BlockedGroupIndexOperations::get_block_offset(group_index, block_size);
             let flatten_index = block_id as usize * block_size + block_offset as usize;
             expected.insert(flatten_index, value);
         }
