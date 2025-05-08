@@ -54,6 +54,8 @@ pub trait GroupIndexOperations: Debug {
     fn get_block_id(packed_index: u64) -> u32;
 
     fn get_block_offset(packed_index: u64) -> u64;
+
+    fn get_flat_index(block_id: u32, block_offset: u64, block_size: usize) -> usize;
 }
 
 #[derive(Debug)]
@@ -71,6 +73,10 @@ impl GroupIndexOperations for BlockedGroupIndexOperations {
     fn get_block_offset(packed_index: u64) -> u64 {
         (packed_index as u32) as u64
     }
+
+    fn get_flat_index(block_id: u32, block_offset: u64, block_size: usize) -> usize {
+        block_id as usize * block_size + block_offset as usize
+    }
 }
 
 #[derive(Debug)]
@@ -87,5 +93,9 @@ impl GroupIndexOperations for FlatGroupIndexOperations {
 
     fn get_block_offset(packed_index: u64) -> u64 {
         packed_index
+    }
+
+    fn get_flat_index(_block_id: u32, block_offset: u64, _block_size: usize) -> usize {
+        block_offset as usize
     }
 }
