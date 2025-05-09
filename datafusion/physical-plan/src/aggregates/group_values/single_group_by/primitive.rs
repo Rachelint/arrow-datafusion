@@ -24,8 +24,9 @@ use arrow::array::{
 };
 use arrow::datatypes::{i256, DataType};
 use arrow::record_batch::RecordBatch;
-use datafusion_common::Result;
+use datafusion_common::{internal_datafusion_err, internal_err, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
+use datafusion_expr::groups_accumulator::EmitBlocksContext;
 use datafusion_expr::EmitTo;
 use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_index_operations::{
     BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,
@@ -99,9 +100,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     null_group: Option<usize>,
 
     /// The values for each group index
-    values: Vec<Vec<T::Native>>,
-
-    next_emit_block_id: usize,
+    values: VecDeque<Vec<T::Native>>,
 
     /// The random state used to generate hashes
     random_state: RandomState,
@@ -116,7 +115,23 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     ///
     block_size: Option<usize>,
 
+    /// Number of current storing groups
+    ///
+    /// We maintain it to avoid the expansive dynamic computation of
+    /// `groups number` and `target group index` in `blocked approach`
+    ///
+    /// Especially the computation of `target group index`, we need to
+    /// perform it on `row-level`, it is actually very very expansive...
+    ///
+    /// So Even it will introduce some complexity of maintain, it still
+    /// be worthy to do that.
+    ///
     num_groups: usize,
+
+    /// Flag used in emitting in `blocked approach`
+    /// Mark if it is during blocks emitting, if so states can't
+    /// be updated until all blocks are emitted
+    emitting: bool,
 }
 
 impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
@@ -125,18 +140,18 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
 
         // As a optimization, we ensure the `single block` always exist
         // in flat mode, it can eliminate an expansive row-level empty checking
-        let mut values = Vec::new();
-        values.push(Vec::new());
+        let mut values = VecDeque::new();
+        values.push_back(Vec::new());
 
         Self {
             data_type,
             map: HashTable::with_capacity(128),
             values,
-            next_emit_block_id: 0,
             null_group: None,
             random_state: Default::default(),
             block_size: None,
             num_groups: 0,
+            emitting: false,
         }
     }
 }
@@ -146,13 +161,17 @@ where
     T::Native: HashValue,
 {
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
+        if self.emitting {
+            return internal_err!("can not update groups during blocks emitting");
+        }
+
         if let Some(block_size) = self.block_size {
-            let before_add_group = |group_values: &mut Vec<Vec<T::Native>>| {
+            let before_add_group = |group_values: &mut VecDeque<Vec<T::Native>>| {
                 if group_values.is_empty()
-                    || group_values.last().unwrap().len() == block_size
+                    || group_values.back().unwrap().len() == block_size
                 {
                     let new_block = Vec::with_capacity(block_size);
-                    group_values.push(new_block);
+                    group_values.push_back(new_block);
                 }
             };
             self.get_or_create_groups::<_, BlockedGroupIndexOperations>(
@@ -164,18 +183,35 @@ where
             self.get_or_create_groups::<_, FlatGroupIndexOperations>(
                 cols,
                 groups,
-                |_: &mut Vec<Vec<T::Native>>| {},
+                |_: &mut VecDeque<Vec<T::Native>>| {},
             )
         }
     }
 
     fn size(&self) -> usize {
-        self.map.capacity() * size_of::<(u64, u64)>()
-            + self
+        let map_size = self.map.capacity() * size_of::<(u64, u64)>();
+        let values_size = if !self.values.is_empty() {
+            // Last block may be non-full, so we compute size with two steps:
+            //   - Compute size of first `n - 1` full blocks
+            //   - Add the size of last block
+            let num_blocks = self.values.len();
+            let full_blocks_size = (num_blocks - 1)
+                * self
+                    .values
+                    .front()
+                    .map(|blk| blk.len() * blk.allocated_size())
+                    .unwrap_or_default();
+            let last_block_size = self
                 .values
-                .iter()
+                .back()
                 .map(|blk| blk.len() * blk.allocated_size())
-                .sum::<usize>()
+                .unwrap_or_default();
+            full_blocks_size + last_block_size
+        } else {
+            0
+        };
+
+        map_size + values_size
     }
 
     fn is_empty(&self) -> bool {
@@ -184,7 +220,6 @@ where
 
     fn len(&self) -> usize {
         self.num_groups
-        // self.values.iter().map(|block| block.len()).sum::<usize>()
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
@@ -215,7 +250,7 @@ where
 
                 self.map.clear();
                 build_primitive(
-                    std::mem::take(self.values.last_mut().unwrap()),
+                    std::mem::take(self.values.back_mut().unwrap()),
                     self.null_group.take().map(|idx| idx as usize),
                 )
             }
@@ -249,7 +284,7 @@ where
                     None => None,
                 };
 
-                let single_block = self.values.last_mut().unwrap();
+                let single_block = self.values.back_mut().unwrap();
                 let mut split = single_block.split_off(n as usize);
                 std::mem::swap(single_block, &mut split);
                 build_primitive(split, null_group.map(|idx| idx as usize))
@@ -263,61 +298,70 @@ where
                     .block_size
                     .expect("only support EmitTo::Next in blocked group values");
 
+                // To mark the emitting has already started
+                self.emitting = true;
+
                 // Similar as `EmitTo:All`, we will clear the old index infos both
                 // in `map` and `null_group`
                 self.map.clear();
 
-                // Get current emit block id firstly
-                let emit_block_id = self.next_emit_block_id;
-                let emit_blk = std::mem::take(&mut self.values[emit_block_id]);
-                self.next_emit_block_id += 1;
+                // Get current emit block
+                let emit_block = self.values.pop_front().ok_or_else(|| {
+                    internal_datafusion_err!("try to emit empty blocks")
+                })?;
 
-                // Check if `null` is in current block
-                let null_block_pair_opt = self.null_group.map(|group_index| {
-                    (
-                        BlockedGroupIndexOperations::get_block_id(
-                            group_index,
-                            block_size,
-                        ),
-                        BlockedGroupIndexOperations::get_block_offset(
-                            group_index,
-                            block_size,
-                        ),
-                    )
-                });
-                let null_idx = match null_block_pair_opt {
-                    Some((blk_id, blk_offset)) if blk_id as usize == emit_block_id => {
-                        Some(blk_offset as usize)
+                if self.values.is_empty() {
+                    self.emitting = false;
+                }
+
+                // Check if `null` is in current block:
+                //   - If so, we take it
+                //   - If not, we shift down the group index
+                let null_group = match &mut self.null_group {
+                    Some(v) if *v >= block_size => {
+                        *v -= block_size;
+                        None
                     }
-                    _ => None,
+                    Some(_) => self.null_group.take(),
+                    None => None,
                 };
 
-                build_primitive(emit_blk, null_idx)
+                let null_idx = null_group.map(|group_idx| {
+                    BlockedGroupIndexOperations::get_block_offset(group_idx, block_size)
+                });
+
+                build_primitive(emit_block, null_idx)
             }
         };
 
+        // Maintain number of groups
         self.num_groups -= array.len();
+
         Ok(vec![Arc::new(array.with_data_type(self.data_type.clone()))])
     }
 
     fn clear_shrink(&mut self, batch: &RecordBatch) {
         let count = batch.num_rows();
 
+        // Clear values
         // TODO: Only reserve room of values in `flat mode` currently,
         // we may need to consider it again when supporting spilling
         // for `blocked mode`.
         if self.block_size.is_none() {
-            let single_block = self.values.last_mut().unwrap();
+            let single_block = self.values.back_mut().unwrap();
             single_block.clear();
             single_block.shrink_to(count);
         } else {
             self.values.clear();
         }
 
+        // Clear mappings
         self.map.clear();
         self.map.shrink_to(count, |_| 0); // hasher does not matter since the map is cleared
         self.null_group = None;
-        self.next_emit_block_id = 0;
+
+        // Clear helping structures
+        self.emitting = false;
         self.num_groups = 0;
     }
 
@@ -326,18 +370,23 @@ where
     }
 
     fn alter_block_size(&mut self, block_size: Option<usize>) -> Result<()> {
-        self.map.clear();
+        // Clear values
         self.values.clear();
+
+        // Clear mappings
+        self.map.clear();
         self.null_group = None;
-        self.block_size = block_size;
-        self.next_emit_block_id = 0;
+
+        // Clear helping structures
+        self.emitting = false;
         self.num_groups = 0;
 
         // As mentioned above, we ensure the `single block` always exist
         // in `flat mode`
         if block_size.is_none() {
-            self.values.push(Vec::new());
+            self.values.push_back(Vec::new());
         }
+        self.block_size = block_size;
 
         Ok(())
     }
@@ -354,7 +403,7 @@ where
         mut before_add_group: F,
     ) -> Result<()>
     where
-        F: FnMut(&mut Vec<Vec<T::Native>>),
+        F: FnMut(&mut VecDeque<Vec<T::Native>>),
         O: GroupIndexOperations,
     {
         assert_eq!(cols.len(), 1);
@@ -369,7 +418,7 @@ where
 
                     // Get block infos and update block,
                     // we need `current block` and `next offset in block`
-                    let current_block = self.values.last_mut().unwrap();
+                    let current_block = self.values.back_mut().unwrap();
                     current_block.push(Default::default());
 
                     // Compute group index
@@ -387,10 +436,7 @@ where
                         |g| unsafe {
                             let block_id = O::get_block_id(g.0, block_size);
                             let block_offset = O::get_block_offset(g.0, block_size);
-                            self.values
-                                .get_unchecked(block_id)
-                                .get_unchecked(block_offset)
-                                .is_eq(key)
+                            self.values[block_id].get_unchecked(block_offset).is_eq(key)
                         },
                         |g| g.1,
                     );
@@ -403,7 +449,7 @@ where
 
                             // Get block infos and update block,
                             // we need `current block` and `next offset in block`
-                            let current_block = self.values.last_mut().unwrap();
+                            let current_block = self.values.back_mut().unwrap();
                             current_block.push(key);
 
                             // Compute group index
@@ -430,8 +476,9 @@ mod tests {
 
     use crate::aggregates::group_values::single_group_by::primitive::GroupValuesPrimitive;
     use crate::aggregates::group_values::GroupValues;
-    use arrow::array::{AsArray, UInt32Array};
+    use arrow::array::{AsArray, RecordBatch, UInt32Array};
     use arrow::datatypes::{DataType, UInt32Type};
+    use arrow_schema::Schema;
     use datafusion_expr::EmitTo;
     use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_index_operations::{
         BlockedGroupIndexOperations, GroupIndexOperations,
