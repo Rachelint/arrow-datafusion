@@ -940,6 +940,21 @@ pub trait AggregateUDFImpl: Debug + Send + Sync {
     fn set_monotonicity(&self, _data_type: &DataType) -> SetMonotonicity {
         SetMonotonicity::NotMonotonic
     }
+
+    /// If this function is a linear function, return true
+    /// If the function is not, return false
+    ///
+    /// The Linear aggregation function will satisfy such transforming:
+    ///
+    /// ```text
+    ///   f(3x + y) = 3 * f(x) + f(y)
+    ///
+    ///   NOTICE: both `x` and `y` should be non-nullable
+    /// ```
+    ///
+    fn is_linear(&self) -> bool {
+        false
+    }
 }
 
 impl PartialEq for dyn AggregateUDFImpl {
