@@ -369,8 +369,16 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .build();
             }
         } else {
+            // 主要逻辑:
+            //   1.先从 provider 中，寻找 udaf 的注册信息
+            //   2.从 ast 获取并生成 args(主要), order_by, filter 等的 `Expr`
+            //     (主要函数是 sql_expr_to_logical_expr)
+            //   3.创建 AggregateFunction (aggr 的 Expr)
+
+            // 1.先从 provider 中，寻找 udaf 的注册信息
             // User defined aggregate functions (UDAF) have precedence in case it has the same name as a scalar built-in function
             if let Some(fm) = self.context_provider.get_aggregate_meta(&name) {
+                // 2.从 ast 获取并生成 args(主要), order_by, filter 等的 `Expr` (主要函数是 sql_expr_to_logical_expr)
                 if fm.is_ordered_set_aggregate() && within_group.is_empty() {
                     return plan_err!("WITHIN GROUP clause is required when calling ordered set aggregate function({})", fm.name());
                 }
@@ -419,6 +427,7 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     .transpose()?
                     .map(Box::new);
 
+                // 3.创建 AggregateFunction (aggr 的 Expr)
                 let mut aggregate_expr = RawAggregateExpr {
                     func: fm,
                     args,
@@ -427,6 +436,9 @@ impl<S: ContextProvider> SqlToRel<'_, S> {
                     order_by,
                     null_treatment,
                 };
+
+                // 看了一下 `plan_aggregate` 主要是做一些类似于 analyzer 的工作，
+                // 暂时只是用在将 count(1) 转为 count(*) 上面。
                 for planner in self.context_provider.get_expr_planners().iter() {
                     match planner.plan_aggregate(aggregate_expr)? {
                         PlannerResult::Planned(expr) => return Ok(expr),

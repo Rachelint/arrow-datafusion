@@ -784,7 +784,14 @@ impl<'a> TreeNodeContainer<'a, Expr> for Sort {
 #[derive(Clone, PartialEq, Eq, PartialOrd, Hash, Debug)]
 pub struct AggregateFunction {
     /// Name of the function
+    // Udaf 描述结构, 类似于 `TableProvider`, 主要有两个作用：
+    //
+    //   1.提供 schema 相关元信息
+    //   2.提供构建 physical plan 的接口
+    //
     pub func: Arc<crate::AggregateUDF>,
+
+    // Udaf 的参数，包括: `args`, `order_by`, `filter` 等, 都是 `Expr`
     pub params: AggregateFunctionParams,
 }
 
