@@ -54,6 +54,7 @@ use crate::replace_distinct_aggregate::ReplaceDistinctWithAggregate;
 use crate::scalar_subquery_to_join::ScalarSubqueryToJoin;
 use crate::simplify_expressions::SimplifyExpressions;
 use crate::single_distinct_to_groupby::SingleDistinctToGroupBy;
+use crate::transform_linear_aggregation::TransformLinearAggregation;
 use crate::utils::log_plan;
 
 /// `OptimizerRule`s transforms one [`LogicalPlan`] into another which
@@ -243,6 +244,8 @@ impl Optimizer {
             // The previous optimizations added expressions and projections,
             // that might benefit from the following rules
             Arc::new(EliminateGroupByConstant::new()),
+            // Try to transform linear udaf to reduce computation
+            Arc::new(TransformLinearAggregation::new()),
             Arc::new(CommonSubexprEliminate::new()),
             Arc::new(OptimizeProjections::new()),
         ];

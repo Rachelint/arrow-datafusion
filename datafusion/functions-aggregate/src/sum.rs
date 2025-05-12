@@ -266,6 +266,10 @@ impl AggregateUDFImpl for Sum {
             _ => SetMonotonicity::NotMonotonic,
         }
     }
+
+    fn is_linear(&self) -> bool {
+        true
+    }
 }
 
 /// This accumulator computes SUM incrementally

@@ -325,6 +325,11 @@ impl AggregateUDF {
         self.inner.is_ordered_set_aggregate()
     }
 
+    /// See [`AggregateUDFImpl::is_linear`] for more details.
+    pub fn is_linear(&self) -> bool {
+        self.inner.is_linear()
+    }
+
     /// Returns the documentation for this Aggregate UDF.
     ///
     /// Documentation can be accessed programmatically as well as

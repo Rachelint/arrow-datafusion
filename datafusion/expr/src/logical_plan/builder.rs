@@ -1236,6 +1236,7 @@ impl LogicalPlanBuilder {
     ) -> Result<Self> {
         let group_expr = normalize_cols(group_expr, &self.plan)?;
         let aggr_expr = normalize_cols(aggr_expr, &self.plan)?;
+        println!("{aggr_expr:?}");
 
         let group_expr = if self.options.add_implicit_group_by_exprs {
             add_group_by_exprs_from_dependencies(group_expr, self.plan.schema())?
