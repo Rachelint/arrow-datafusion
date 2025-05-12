@@ -22,10 +22,10 @@ use crate::optimizer::ApplyOrder;
 use crate::{OptimizerConfig, OptimizerRule};
 
 use datafusion_common::tree_node::{Transformed, TreeNode};
-use datafusion_common::{internal_err, DFSchema, Result};
+use datafusion_common::{internal_err, DFSchema, HashSet, Result};
 use datafusion_expr::expr::{AggregateFunction, AggregateFunctionParams, Alias};
 use datafusion_expr::{
-    Aggregate, BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder,
+    col, Aggregate, BinaryExpr, Expr, ExprSchemable, LogicalPlan, LogicalPlanBuilder,
     Operator, Volatility,
 };
 
@@ -61,12 +61,13 @@ impl OptimizerRule for TransformLinearAggregation {
                 }
 
                 // Try to transform `aggr_expr`
-                let mut new_aggr_exprs = Vec::with_capacity(aggregate.aggr_expr.len());
+                let mut new_aggr_exprs =
+                    HashSet::with_capacity(aggregate.aggr_expr.len());
                 let mut new_proj_exprs = Vec::new();
                 let mut transformed = false;
                 let input_schema = aggregate.input.schema();
                 for expr in aggregate.aggr_expr.iter() {
-                    transformed = maybe_transform_aggr_expr(
+                    transformed |= maybe_transform_aggr_expr(
                         expr,
                         input_schema,
                         &mut new_aggr_exprs,
@@ -82,7 +83,7 @@ impl OptimizerRule for TransformLinearAggregation {
                 let transformed_aggregate = LogicalPlan::Aggregate(Aggregate::try_new(
                     aggregate.input,
                     aggregate.group_expr.clone(),
-                    new_aggr_exprs,
+                    new_aggr_exprs.into_iter().collect(),
                 )?);
 
                 let projection_expr =
@@ -118,7 +119,7 @@ impl OptimizerRule for TransformLinearAggregation {
 fn maybe_transform_aggr_expr(
     aggr_expr: &Expr,
     input_schema: &DFSchema,
-    new_aggr_exprs: &mut Vec<Expr>,
+    new_aggr_exprs: &mut HashSet<Expr>,
     new_proj_exprs: &mut Vec<Expr>,
 ) -> Result<bool> {
     let Expr::AggregateFunction(AggregateFunction { func, params }) = aggr_expr else {
@@ -143,8 +144,8 @@ fn maybe_transform_aggr_expr(
         || args.len() != 1
         || args[0].nullable(input_schema)?
     {
-        dbg!("return in check transforming failed");
-        new_aggr_exprs.push(aggr_expr.clone());
+        new_aggr_exprs.insert(aggr_expr.clone());
+        new_proj_exprs.push(aggr_expr.clone());
         return Ok(false);
     }
 
@@ -158,8 +159,8 @@ fn maybe_transform_aggr_expr(
         right,
     }) = &args[0]
     else {
-        dbg!("return in tranform failed");
-        new_aggr_exprs.push(aggr_expr.clone());
+        new_aggr_exprs.insert(aggr_expr.clone());
+        new_proj_exprs.push(aggr_expr.clone());
         return Ok(false);
     };
 
@@ -202,7 +203,7 @@ mod tests {
     use datafusion_common::Result;
     use datafusion_expr::expr::ScalarFunction;
     use datafusion_expr::{
-        col, lit, ColumnarValue, LogicalPlanBuilder, ScalarFunctionArgs, ScalarUDF,
+        cast, col, lit, ColumnarValue, LogicalPlanBuilder, ScalarFunctionArgs, ScalarUDF,
         ScalarUDFImpl, Signature, TypeSignature,
     };
 
@@ -229,7 +230,14 @@ mod tests {
     fn test_eliminate_gby_literal() {
         let scan = test_table_scan().unwrap();
         let plan = LogicalPlanBuilder::from(scan)
-            .aggregate(Vec::<Expr>::new(), vec![sum(col("c") + col("b"))])
+            .aggregate(
+                Vec::<Expr>::new(),
+                vec![
+                    sum(cast(col("d"), DataType::Int64) + lit(1_i64)),
+                    sum(cast(col("d"), DataType::Int64) + lit(2_i64)),
+                    sum(cast(col("d"), DataType::Int64) + lit(3_i64)),
+                ],
+            )
             .unwrap()
             .build()
             .unwrap();
@@ -239,7 +247,6 @@ mod tests {
         let opt_context = OptimizerContext::new().with_max_passes(1);
         let optimizer = Optimizer::with_rules(vec![Arc::clone(&rule)]);
         let optimized_plan = optimizer.optimize(plan, &opt_context, |_, _| {}).unwrap();
-        println!("{optimized_plan}");
 
         // assert_optimized_plan_equal!(plan, @r"
         // Projection: test.a, UInt32(1), count(test.c)

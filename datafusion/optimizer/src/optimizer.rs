@@ -23,7 +23,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use datafusion_expr::registry::FunctionRegistry;
 use datafusion_expr::{assert_expected_schema, InvariantLevel};
-use log::{debug, warn};
+use log::{debug, error, warn};
 
 use datafusion_common::alias::AliasGenerator;
 use datafusion_common::config::ConfigOptions;
@@ -402,6 +402,7 @@ impl Optimizer {
                     }
                     // OptimizerRule was unsuccessful, but skipped failed rules is off, return error
                     (Err(e), None) => {
+                        debug!("Optimizer rule '{}' failed, error:{e}", rule.name());
                         return Err(e.context(format!(
                             "Optimizer rule '{}' failed",
                             rule.name()
