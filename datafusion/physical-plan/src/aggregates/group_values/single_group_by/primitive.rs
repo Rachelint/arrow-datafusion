@@ -313,11 +313,12 @@ where
                 };
 
                 let init_block_builder = || mem::take(&mut self.values);
-                let emit_block = self.emit_state.emit_block(
-                    total_num_groups,
-                    block_size,
-                    init_block_builder,
-                );
+                let emit_block = self
+                    .emit_state
+                    .emit_block(total_num_groups, block_size, init_block_builder)
+                    .ok_or_else(|| {
+                        internal_datafusion_err!("try to evaluate empty group values")
+                    })?;
 
                 // Check if `null` is in current block:
                 //   - If so, we take it

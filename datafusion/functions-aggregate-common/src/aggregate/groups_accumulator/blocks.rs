@@ -117,27 +117,30 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
         self.total_num_groups += block_len;
     }
 
-    /// Emit block
+    /// Emit blocks iteratively
     ///
     /// Because we don't know few about how to init the[`EmitBlockBuilder`],
     /// so we expose `init_block_builder` to let the caller define it.
-    pub fn emit_block<F>(&mut self, mut init_block_builder: F) -> Option<B>
+    pub fn emit_next_block<F>(&mut self, mut init_block_builder: F) -> Option<B>
     where
         F: FnMut(&mut Vec<B>) -> E,
     {
         let (total_num_groups, block_size) = if !self.is_emitting() {
-            (self.total_num_groups, self.block_size.unwrap_or(usize::MAX))
+            // When emitting start, all data(`inner`) will be taken into `emit_state`
+            // to consume iteratively until empty.
+            // So we should set the `total_num_groups` to 0 at the beginning.
+            let cur_total_num_groups = self.total_num_groups;
+            self.total_num_groups = 0;
+            (cur_total_num_groups, self.block_size.unwrap_or(usize::MAX))
         } else {
             (0, 0)
         };
 
-        let emit_block = self
-            .emit_state
-            .emit_block(total_num_groups, block_size, || {
-                init_block_builder(&mut self.inner)
-            });
-
-        self.total_num_groups -= emit_block.len();
+        let emit_block =
+            self.emit_state
+                .emit_block(total_num_groups, block_size, || {
+                    init_block_builder(&mut self.inner)
+                })?;
 
         Some(emit_block)
     }
@@ -275,11 +278,11 @@ impl<E: EmitBlockBuilder> EmitBlocksState<E> {
         total_num_groups: usize,
         block_size: usize,
         mut init_block_builder: F,
-    ) -> E::B
+    ) -> Option<E::B>
     where
         F: FnMut() -> E,
     {
-        let emit_block = loop {
+        loop {
             match self {
                 Self::Init => {
                     // Init needed contexts
@@ -313,9 +316,8 @@ impl<E: EmitBlockBuilder> EmitBlocksState<E> {
                 }) => {
                     // Found empty blocks, return and reset directly
                     if next_emit_index == num_blocks {
-                        let emit_block = block_builder.build(0, *block_size, true, 0);
                         *self = Self::Init;
-                        break emit_block;
+                        break None;
                     }
 
                     // Get current emit block idx
@@ -338,12 +340,10 @@ impl<E: EmitBlockBuilder> EmitBlocksState<E> {
                         *self = Self::Init;
                     }
 
-                    break emit_block;
+                    break Some(emit_block);
                 }
             }
-        };
-
-        emit_block
+        }
     }
 
     #[inline]
@@ -406,7 +406,7 @@ impl<Ty: Clone + Debug> Block for Vec<Ty> {
 }
 
 impl<T: Clone + Debug> GeneralBlocks<T> {
-    pub fn emit(&mut self, emit_to: EmitTo) -> Vec<T> {
+    pub fn emit(&mut self, emit_to: EmitTo) -> Option<Vec<T>> {
         let init_block_builder = |inner: &mut Vec<Vec<T>>| mem::take(inner);
 
         if matches!(emit_to, EmitTo::NextBlock) {
@@ -414,8 +414,7 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
                 self.block_size.is_some(),
                 "only support emit next block in blocked groups"
             );
-            self.emit_block(init_block_builder)
-                .expect("should not call emit for empty blocks")
+            self.emit_next_block(init_block_builder)
         } else {
             // TODO: maybe remove `EmitTo::take_needed` and move the
             // pattern matching codes here after supporting blocked approach
@@ -429,17 +428,14 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
             //   - Pop the `block` firstly
             //   - Take `need rows` from `block`
             //   - Push back the `block` if still some rows in it
-            let mut block = self
-                .emit_block(init_block_builder)
-                .expect("should not call emit for empty blocks");
-
+            let mut block = self.emit_next_block(init_block_builder)?;
             let emit_block = emit_to.take_needed(&mut block);
 
             if !block.is_empty() {
                 self.push_block(block);
             }
 
-            emit_block
+            Some(emit_block)
         }
     }
 }
@@ -464,97 +460,210 @@ impl<T: Debug> EmitBlockBuilder for Vec<Vec<T>> {
 
 #[cfg(test)]
 mod test {
+    use std::usize;
+
+    use datafusion_expr_common::groups_accumulator::EmitTo;
+
     use super::EmitBlockBuilder;
-    use crate::aggregate::groups_accumulator::blocks::Blocks;
+    use crate::aggregate::groups_accumulator::{
+        blocks::{Blocks, GeneralBlocks},
+        group_index_operations::{
+            BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,
+        },
+    };
 
-    // type TestBlocks = Blocks<Vec<u32>>;
+    type TestBlocks = GeneralBlocks<i32>;
 
-    // #[test]
-    // fn test() {
-    //     let mut a = vec![vec!["".to_string()]];
-    //     a.build(0, 0, true, 0);
-    // }
-    // #[test]
-    // fn test_single_block_resize() {
-    //     let new_block = |block_size: Option<usize>| {
-    //         let cap = block_size.unwrap_or(0);
-    //         Vec::with_capacity(cap)
-    //     };
+    fn fill_blocks<O: GroupIndexOperations>(
+        blocks: &mut TestBlocks,
+        offset: usize,
+        values: &[i32],
+    ) {
+        let block_size = blocks.block_size.unwrap_or_default();
+        for (idx, &val) in values.iter().enumerate() {
+            let group_index = offset + idx;
+            let block_id = O::get_block_id(group_index, block_size);
+            let block_offset = O::get_block_offset(group_index, block_size);
+            blocks[block_id][block_offset] = val;
+        }
+    }
 
-    //     let mut blocks = TestBlocks::new(None);
-    //     assert_eq!(blocks.len(), 0);
+    #[test]
+    fn test_single_block() {
+        let mut blocks = TestBlocks::new(None);
+        assert_eq!(blocks.num_blocks(), 0);
+        assert_eq!(blocks.total_num_groups(), 0);
 
-    //     for _ in 0..2 {
-    //         // Should have single block, 5 block len, all data are 42
-    //         blocks.resize(5, new_block, 42);
-    //         assert_eq!(blocks.len(), 1);
-    //         assert_eq!(blocks[0].len(), 5);
-    //         blocks[0].iter().for_each(|num| assert_eq!(*num, 42));
+        for _ in 0..2 {
+            // Expand to 5 groups with 42, contexts to check:
+            //   - Exist num blocks: 1
+            //   - Exist num groups: 5
+            //   - Exist groups: `[42; 5]`
+            blocks.expand(5, 42);
+            assert_eq!(blocks.num_blocks(), 1);
+            assert_eq!(blocks.total_num_groups(), 5);
+            assert_eq!(&blocks[0], &[42; 5]);
 
-    //         // Resize to a larger block
-    //         // Should still have single block, 10 block len, all data are 42
-    //         blocks.resize(10, new_block, 42);
-    //         assert_eq!(blocks.len(), 1);
-    //         assert_eq!(blocks[0].len(), 10);
-    //         blocks[0].iter().for_each(|num| assert_eq!(*num, 42));
+            // Modify the first 5 groups to `[0, 1, 2, 3, 4]`, contexts to check:
+            //   - Exist groups: `[0, 1, 2, 3, 4]`
+            let values0 = [0, 1, 2, 3, 4];
+            fill_blocks::<FlatGroupIndexOperations>(&mut blocks, 0, &values0);
+            assert_eq!(&blocks[0], &values0);
 
-    //         // Clear
-    //         // Should have nothing after clearing
-    //         blocks.clear();
-    //         assert_eq!(blocks.len(), 0);
+            // Expand to 10 groups with 42, contexts to check:
+            //   - Exist num blocks: 1
+            //   - Exist num groups: 10
+            //   - Exist groups: `[0, 1, 2, 3, 4, 42, 42, 42, 42, 42]`
+            blocks.expand(10, 42);
+            assert_eq!(blocks.num_blocks(), 1);
+            assert_eq!(blocks.total_num_groups(), 10);
+            assert_eq!(&blocks[0], &[0, 1, 2, 3, 4, 42, 42, 42, 42, 42]);
 
-    //         // Test resize after clear in next round
-    //     }
-    // }
+            // Modify the last 5 groups to `[5, 6, 7, 8, 9]`, contexts to check:
+            //   - Exist groups: `[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]`
+            let values1 = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+            fill_blocks::<FlatGroupIndexOperations>(&mut blocks, 5, &values1[5..10]);
+            assert_eq!(&blocks[0], &values1);
 
-    // #[test]
-    // fn test_multi_blocks_resize() {
-    //     let new_block = |block_size: Option<usize>| {
-    //         let cap = block_size.unwrap_or(0);
-    //         Vec::with_capacity(cap)
-    //     };
+            // Emit first 4 groups, contexts to check:
+            //   - Emitted num groups: 4
+            //   - Emitted groups: `[0, 1 ,2, 3]`
+            //   - Exist num blocks: 1
+            //   - Exist num groups: 6
+            //   - Exist groups: `[4, 5, 6, 7, 8, 9]`
+            let emit_block = blocks.emit(EmitTo::First(4)).unwrap();
+            assert_eq!(emit_block.len(), 4);
+            assert_eq!(&emit_block, &[0, 1, 2, 3]);
+            assert_eq!(blocks.num_blocks(), 1);
+            assert_eq!(blocks.total_num_groups(), 6);
+            assert_eq!(&blocks[0], &[4, 5, 6, 7, 8, 9]);
 
-    //     let mut blocks = TestBlocks::new(Some(3));
-    //     assert_eq!(blocks.len(), 0);
+            // Resize back to 12 groups after emit first 4 with 42, contexts to check:
+            //   - Exist num blocks: 1
+            //   - Exist num groups: 12
+            //   - Exist groups: `[4, 5, 6, 7, 8, 9, 42, 42, 42, 42, 42, 42]`
+            blocks.expand(12, 42);
+            assert_eq!(blocks.num_blocks(), 1);
+            assert_eq!(blocks.total_num_groups(), 12);
+            assert_eq!(&blocks[0], &[4, 5, 6, 7, 8, 9, 42, 42, 42, 42, 42, 42]);
 
-    //     for _ in 0..2 {
-    //         // Should have:
-    //         //  - 2 blocks
-    //         //  - `block 0` of 3 len
-    //         //  - `block 1` of 2 len
-    //         //  - all data are 42
-    //         blocks.resize(5, new_block, 42);
-    //         assert_eq!(blocks.len(), 2);
-    //         assert_eq!(blocks[0].len(), 3);
-    //         blocks[0].iter().for_each(|num| assert_eq!(*num, 42));
-    //         assert_eq!(blocks[1].len(), 2);
-    //         blocks[1].iter().for_each(|num| assert_eq!(*num, 42));
+            // Modify the last 6 groups to `[20, 21, 22, 23, 24, 25]`, contexts to check:
+            //   - Exist groups: `[4, 5, 6, 7, 8, 9, 20, 21, 22, 23, 24, 25]`
+            let values2 = [4, 5, 6, 7, 8, 9, 20, 21, 22, 23, 24, 25];
+            fill_blocks::<FlatGroupIndexOperations>(&mut blocks, 6, &values2[6..12]);
+            assert_eq!(&blocks[0], &values2);
 
-    //         // Resize to larger blocks
-    //         // Should have:
-    //         //  - 4 blocks
-    //         //  - `block 0` of 3 len
-    //         //  - `block 1` of 3 len
-    //         //  - `block 2` of 3 len
-    //         //  - `block 3` of 1 len
-    //         //  - all data are 42
-    //         blocks.resize(10, new_block, 42);
-    //         assert_eq!(blocks.len(), 4);
-    //         assert_eq!(blocks[0].len(), 3);
-    //         blocks[0].iter().for_each(|num| assert_eq!(*num, 42));
-    //         assert_eq!(blocks[1].len(), 3);
-    //         blocks[1].iter().for_each(|num| assert_eq!(*num, 42));
-    //         assert_eq!(blocks[2].len(), 3);
-    //         blocks[2].iter().for_each(|num| assert_eq!(*num, 42));
-    //         assert_eq!(blocks[3].len(), 1);
-    //         blocks[3].iter().for_each(|num| assert_eq!(*num, 42));
+            // Emit all, contexts to check:
+            //   - Emitted num groups: 12
+            //   - Emitted groups: `[4, 5, 6, 7, 8, 9, 20, 21, 22, 23, 24, 25]`
+            //   - Exist num blocks: 0
+            //   - Exist num groups: 0
+            let emit_block = blocks.emit(EmitTo::All).unwrap();
+            assert_eq!(emit_block.len(), 12);
+            assert_eq!(&emit_block, &[4, 5, 6, 7, 8, 9, 20, 21, 22, 23, 24, 25]);
+            assert_eq!(blocks.num_blocks(), 0);
+            assert_eq!(blocks.total_num_groups(), 0);
 
-    //         // Clear
-    //         // Should have nothing after clearing
-    //         blocks.clear();
-    //         assert_eq!(blocks.len(), 0);
+            // Check emit empty blocks
+            assert!(blocks.emit(EmitTo::All).is_none());
+            assert!(blocks.emit(EmitTo::First(1)).is_none());
 
-    //         // Test resize after clear in next round
-    //     }
-    // }
+            // Test in next round
+        }
+    }
+
+    #[test]
+    fn test_multi_blocks() {
+        let mut blocks = TestBlocks::new(Some(3));
+        assert_eq!(blocks.num_blocks(), 0);
+        assert_eq!(blocks.total_num_groups(), 0);
+
+        for _ in 0..2 {
+            // Expand to 5 groups with 42, contexts to check:
+            //   - Exist num blocks: 2
+            //   - Exist num groups: 5
+            //   - Exist block 0: `[42; 3]`
+            //   - Exist block 1: `[42; 3]`
+            //     (in `blocked approach`, groups will always be expanded to len
+            //     of `block_size * N`)
+            blocks.expand(5, 42);
+            assert_eq!(blocks.num_blocks(), 2);
+            assert_eq!(blocks.total_num_groups(), 5);
+            assert_eq!(&blocks[0], &[42; 3]);
+            assert_eq!(&blocks[1], &[42; 3]);
+
+            // Modify the first 5 groups to `[0, 1, 2, 3, 4]`, contexts to check:
+            //   - Exist block 0: `[0, 1, 2]`
+            //   - Exist block 1: `[3, 4, 42]`
+            let values = [0, 1, 2, 3, 4];
+            fill_blocks::<BlockedGroupIndexOperations>(&mut blocks, 0, &values);
+            assert_eq!(&blocks[0], &[0, 1, 2]);
+            assert_eq!(&blocks[1], &[3, 4, 42]);
+
+            // Expand to 10 groups with 42, contexts to check:
+            //   - Exist num blocks: 4
+            //   - Exist num groups: 10
+            //   - Exist block 0: `[0, 1, 2]`
+            //   - Exist block 1: `[3, 4, 42]`
+            //   - Exist block 2: `[42, 42, 42]`
+            //   - Exist block 3: `[42, 42, 42]`
+            blocks.expand(10, 42);
+            assert_eq!(blocks.num_blocks(), 4);
+            assert_eq!(blocks.total_num_groups(), 10);
+            assert_eq!(&blocks[0], &[0, 1, 2]);
+            assert_eq!(&blocks[1], &[3, 4, 42]);
+            assert_eq!(&blocks[2], &[42, 42, 42]);
+            assert_eq!(&blocks[3], &[42, 42, 42]);
+
+            // Modify the last 5 groups to `[5, 6, 7, 8, 9]`, contexts to check:
+            //   - Exist block 0: `[0, 1, 2]`
+            //   - Exist block 1: `[3, 4, 5]`
+            //   - Exist block 2: `[6, 7, 8]`
+            //   - Exist block 3: `[9, 42, 42]`
+            let values = [5, 6, 7, 8, 9];
+            fill_blocks::<BlockedGroupIndexOperations>(&mut blocks, 5, &values);
+            assert_eq!(&blocks[0], &[0, 1, 2]);
+            assert_eq!(&blocks[1], &[3, 4, 5]);
+            assert_eq!(&blocks[2], &[6, 7, 8]);
+            assert_eq!(&blocks[3], &[9, 42, 42]);
+
+            // Emit blocks, it is actually an alternative of `EmitTo::All`, so when we
+            // start to emit the first block, contexts should be:
+            //   - Emitted block 0: `[0, 1, 2]`
+            //   - Exist num blocks: 0
+            //   - Exist num groups: 0
+            //   - Emitting flag: true
+            let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
+            assert_eq!(&emit_block, &[0, 1, 2]);
+            assert_eq!(blocks.num_blocks(), 0);
+            assert_eq!(blocks.total_num_groups(), 0);
+            assert!(blocks.is_emitting());
+
+            // Continue to emit rest 3 blocks, contexts to check:
+            //   - Emitted block 1: `[3, 4, 5]`
+            //   - Emitting flag: true
+            //   - Emitted block 2: `[6, 7, 8]`
+            //   - Emitting flag: true
+            //   - Emitted block 3: `[9]`
+            //   - Emitting flag: false
+            let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
+            assert_eq!(&emit_block, &[3, 4, 5]);
+            assert!(blocks.is_emitting());
+
+            let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
+            assert_eq!(&emit_block, &[6, 7, 8]);
+            assert!(blocks.is_emitting());
+
+            let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
+            assert_eq!(&emit_block, &[9]);
+            assert!(!blocks.is_emitting());
+
+            // Check emit empty blocks
+            assert!(blocks.emit(EmitTo::NextBlock).is_none());
+            // Again for check if it will always be `None`
+            assert!(blocks.emit(EmitTo::NextBlock).is_none());
+
+            // Test in next round
+        }
+    }
 }

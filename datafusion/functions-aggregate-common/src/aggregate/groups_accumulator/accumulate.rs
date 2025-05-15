@@ -541,10 +541,12 @@ impl BlockedNullState {
             (0, 0)
         };
 
-        let build_extension = || self.inner.seen_values.finish();
-        let emit_block =
-            self.emit_state
-                .emit_block(total_num_groups, block_size, build_extension);
+        let init_block_builder = || self.inner.seen_values.finish();
+        // TODO: maybe we should return `None` rather than unwrap
+        let emit_block = self
+            .emit_state
+            .emit_block(total_num_groups, block_size, init_block_builder)
+            .expect("should not emit empty null state");
 
         NullBuffer::new(emit_block)
     }

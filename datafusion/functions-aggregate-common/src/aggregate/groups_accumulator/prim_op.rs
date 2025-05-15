@@ -23,7 +23,7 @@ use arrow::buffer::NullBuffer;
 use arrow::compute;
 use arrow::datatypes::ArrowPrimitiveType;
 use arrow::datatypes::DataType;
-use datafusion_common::{internal_datafusion_err, DataFusionError, Result};
+use datafusion_common::{internal_datafusion_err, internal_err, DataFusionError, Result};
 use datafusion_expr_common::groups_accumulator::{EmitTo, GroupsAccumulator};
 
 use crate::aggregate::groups_accumulator::accumulate::NullStateAdapter;
@@ -98,8 +98,7 @@ where
         let values = values[0].as_primitive::<T>();
 
         // Expand to ensure values are large enough
-        self.values
-            .expand(total_num_groups, self.starting_value);
+        self.values.expand(total_num_groups, self.starting_value);
 
         // NullState dispatches / handles tracking nulls and groups that saw no values
         self.null_state.accumulate(
@@ -117,7 +116,10 @@ where
     }
 
     fn evaluate(&mut self, emit_to: EmitTo) -> Result<ArrayRef> {
-        let values = self.values.emit(emit_to);
+        let values = self
+            .values
+            .emit(emit_to)
+            .ok_or_else(|| internal_datafusion_err!("try to evaluate empty accumulator"))?;
         let nulls = self.null_state.build(emit_to);
         let values = PrimitiveArray::<T>::new(values.into(), Some(nulls)) // no copy
             .with_data_type(self.data_type.clone());
