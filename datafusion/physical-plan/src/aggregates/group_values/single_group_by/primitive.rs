@@ -26,7 +26,6 @@ use arrow::datatypes::{i256, DataType};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{internal_datafusion_err, internal_err, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
-use datafusion_expr::groups_accumulator::EmitBlocksContext;
 use datafusion_expr::EmitTo;
 use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_index_operations::{
     BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,

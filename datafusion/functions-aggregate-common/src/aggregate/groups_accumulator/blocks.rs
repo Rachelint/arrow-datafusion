@@ -22,6 +22,7 @@ use std::{
     fmt::Debug,
     iter,
     ops::{Index, IndexMut},
+    usize,
 };
 
 use datafusion_expr_common::groups_accumulator::EmitTo;
@@ -38,9 +39,8 @@ use datafusion_expr_common::groups_accumulator::EmitTo;
 ///
 #[derive(Debug)]
 pub struct Blocks<B: Block> {
-    inner: Vec<B>,
-    next_emit_block_id: usize,
-    last_block_len: usize,
+    inner: VecDeque<B>,
+    total_num_groups: usize,
     block_size: Option<usize>,
 }
 
@@ -48,59 +48,75 @@ impl<B: Block> Blocks<B> {
     #[inline]
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
-            inner: Vec::new(),
-            next_emit_block_id: 0,
-            last_block_len: 0,
+            inner: VecDeque::new(),
+            total_num_groups: 0,
             block_size,
         }
     }
 
-    pub fn resize(&mut self, total_num_groups: usize, default_val: B::T) {
-        if let Some(block_size) = self.block_size {
-            let blocks_cap = self.inner.len() * block_size;
-            if blocks_cap < total_num_groups {
-                let allocated_blocks =
-                    (total_num_groups - blocks_cap).div_ceil(block_size);
-                self.inner.extend(
-                    iter::repeat_with(|| B::build(self.block_size, default_val.clone()))
-                        .take(allocated_blocks),
-                );
-            }
-            self.last_block_len = block_size + total_num_groups - self.inner.len() * block_size;
-        } else {
-            if self.is_empty() {
-                self.inner.push(B::build(self.block_size, default_val.clone()));
-            }
-            let single_block = self.inner.last_mut().unwrap();
-            single_block.resize(total_num_groups, default_val.clone());
-        };
+    pub fn expand(&mut self, total_num_groups: usize, default_val: B::T) {
+        if self.total_num_groups >= total_num_groups {
+            return;
+        }
+
+        // We compute how many blocks we need to store the `total_num_groups` groups.
+        // And if found the `exist_blocks` are not enough, we allocate more.
+        let needed_blocks =
+            total_num_groups.div_ceil(self.block_size.unwrap_or(usize::MAX));
+        let exist_blocks = self.inner.len();
+        if exist_blocks < needed_blocks {
+            let allocated_blocks = needed_blocks - exist_blocks;
+            self.inner.extend(
+                iter::repeat_with(|| {
+                    let build_ctx = self.block_size.map(|blk_size| {
+                        BuildBlockContext::new(blk_size, default_val.clone())
+                    });
+                    B::build(build_ctx)
+                })
+                .take(allocated_blocks),
+            );
+        }
+
+        // If in `blocked approach`, we can return now.
+        // But In `flat approach`, we keep only `single block`, if found the
+        // `single block` not large enough, we allocate a larger one and copy
+        // the exist data to it(such copy is really expansive).
+        if self.block_size.is_none() {
+            let single_block = self.inner.back_mut().unwrap();
+            single_block.expand(total_num_groups, default_val.clone());
+        }
+
+        self.total_num_groups = total_num_groups;
     }
 
     #[inline]
-    pub fn pop_block(&mut self) -> Option<B> {
-        if self.next_emit_block_id >= self.inner.len() {
-            return None;
-        }
-
-        let emit_block_id = self.next_emit_block_id;
-        let mut emit_blk = std::mem::take(&mut self.inner[emit_block_id]);
-        self.next_emit_block_id += 1;
-
-        if self.next_emit_block_id == self.inner.len() {
-            emit_blk.resize(self.last_block_len, B::T::default());
-        }
-
-        Some(emit_blk)
-    }
-
-    #[inline]
-    pub fn len(&self) -> usize {
+    pub fn num_blocks(&self) -> usize {
         self.inner.len()
     }
 
     #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+    pub fn total_num_groups(&self) -> usize {
+        self.total_num_groups
+    }
+
+    pub fn push_block(&mut self, block: B) {
+        let block_len = block.len();
+        self.inner.push_back(block);
+        self.total_num_groups += block_len;
+    }
+
+    pub fn pop_block(&mut self) -> Option<B> {
+        let mut block = self.inner.pop_front()?;
+
+        // Check if it is the last block, if so maybe we need to truncate
+        // due to the last block may be non-full(len < `block_size`)
+        if self.inner.is_empty() {
+            let last_block_len = self.total_num_groups;
+            block.truncate(last_block_len);
+        }
+
+        self.total_num_groups -= block.len();
+        Some(block)
     }
 
     #[inline]
@@ -111,7 +127,7 @@ impl<B: Block> Blocks<B> {
     #[inline]
     pub fn clear(&mut self) {
         self.inner.clear();
-        self.next_emit_block_id = 0;
+        self.total_num_groups = 0;
     }
 }
 
@@ -138,16 +154,39 @@ impl<B: Block> IndexMut<usize> for Blocks<B> {
 /// to abstract the necessary behaviors of various intermediate result types.
 ///
 pub trait Block: Debug + Default {
-    type T: Clone + Default;
+    type T: Clone;
 
-    fn build(block_size: Option<usize>, default_val: Self::T) -> Self;
+    /// How to build the block
+    fn build(build_ctx: Option<BuildBlockContext<Self::T>>) -> Self;
 
-    fn resize(&mut self, new_len: usize, default_val: Self::T);
+    /// Expand the block to `new_len` with `default_val`
+    ///
+    /// In `flat approach`, we will only keep single block, and need to
+    /// expand it when it is not large enough.
+    fn expand(&mut self, new_len: usize, default_val: Self::T);
 
+    /// Truncate the block to `new_len`
+    fn truncate(&mut self, new_len: usize);
+
+    /// Block len
     fn len(&self) -> usize;
 
     fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+pub struct BuildBlockContext<T> {
+    block_size: usize,
+    default_val: T,
+}
+
+impl<T> BuildBlockContext<T> {
+    pub fn new(block_size: usize, default_val: T) -> Self {
+        Self {
+            block_size,
+            default_val,
+        }
     }
 }
 
@@ -157,27 +196,38 @@ pub type GeneralBlocks<T> = Blocks<Vec<T>>;
 
 /// As mentioned in [`GeneralBlocks`], we usually use `Vec` to represent `Block`,
 /// so we implement `Block` trait for `Vec`
-impl<Ty: Clone + Default + Debug> Block for Vec<Ty> {
+impl<Ty: Clone + Debug> Block for Vec<Ty> {
     type T = Ty;
 
-    fn build(block_size: Option<usize>, default_val: Self::T) -> Self {
-        if let Some(blk_size) = block_size {
-            vec![default_val; blk_size]
+    fn build(build_ctx: Option<BuildBlockContext<Self::T>>) -> Self {
+        if let Some(BuildBlockContext {
+            block_size,
+            default_val,
+        }) = build_ctx
+        {
+            vec![default_val; block_size]
         } else {
             Vec::new()
         }
     }
 
-    fn resize(&mut self, new_len: usize, default_val: Self::T) {
+    #[inline]
+    fn expand(&mut self, new_len: usize, default_val: Self::T) {
         self.resize(new_len, default_val);
     }
 
+    #[inline]
+    fn truncate(&mut self, new_len: usize) {
+        self.truncate(new_len);
+    }
+
+    #[inline]
     fn len(&self) -> usize {
         self.len()
     }
 }
 
-impl<T: Clone + Debug + Default> GeneralBlocks<T> {
+impl<T: Clone + Debug> GeneralBlocks<T> {
     pub fn emit(&mut self, emit_to: EmitTo) -> Vec<T> {
         if matches!(emit_to, EmitTo::NextBlock) {
             assert!(
@@ -194,7 +244,14 @@ impl<T: Clone + Debug + Default> GeneralBlocks<T> {
                 self.block_size.is_none(),
                 "only support emit all/first in flat groups"
             );
-            emit_to.take_needed(&mut self.inner[0])
+
+            let mut block = self
+                .pop_block()
+                .expect("should not call emit for empty blocks");
+            let emit_block = emit_to.take_needed(&mut block);
+            self.push_block(block);
+
+            emit_block
         }
     }
 }

@@ -99,7 +99,7 @@ where
 
         // Expand to ensure values are large enough
         self.values
-            .resize(total_num_groups, self.starting_value);
+            .expand(total_num_groups, self.starting_value);
 
         // NullState dispatches / handles tracking nulls and groups that saw no values
         self.null_state.accumulate(
