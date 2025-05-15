@@ -27,13 +27,14 @@ use arrow::record_batch::RecordBatch;
 use datafusion_common::{internal_datafusion_err, internal_err, Result};
 use datafusion_execution::memory_pool::proxy::VecAllocExt;
 use datafusion_expr::EmitTo;
+use datafusion_functions_aggregate_common::aggregate::groups_accumulator::blocks::EmitBlocksState;
 use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_index_operations::{
     BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,
 };
 use half::f16;
 use hashbrown::hash_table::HashTable;
 use std::collections::VecDeque;
-use std::mem::size_of;
+use std::mem::{self, size_of};
 use std::sync::Arc;
 
 /// A trait to allow hashing of floating point numbers
@@ -99,7 +100,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     null_group: Option<usize>,
 
     /// The values for each group index
-    values: VecDeque<Vec<T::Native>>,
+    values: Vec<Vec<T::Native>>,
 
     /// The random state used to generate hashes
     random_state: RandomState,
@@ -130,7 +131,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     /// Flag used in emitting in `blocked approach`
     /// Mark if it is during blocks emitting, if so states can't
     /// be updated until all blocks are emitted
-    emitting: bool,
+    emit_state: EmitBlocksState<Vec<Vec<T::Native>>>,
 }
 
 impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
@@ -139,8 +140,8 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
 
         // As a optimization, we ensure the `single block` always exist
         // in flat mode, it can eliminate an expansive row-level empty checking
-        let mut values = VecDeque::new();
-        values.push_back(Vec::new());
+        let mut values = Vec::new();
+        values.push(Vec::new());
 
         Self {
             data_type,
@@ -150,8 +151,13 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             random_state: Default::default(),
             block_size: None,
             num_groups: 0,
-            emitting: false,
+            emit_state: EmitBlocksState::Init,
         }
+    }
+
+    #[inline]
+    fn is_emitting(&self) -> bool {
+        self.emit_state.is_emitting()
     }
 }
 
@@ -160,17 +166,17 @@ where
     T::Native: HashValue,
 {
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
-        if self.emitting {
+        if self.is_emitting() {
             return internal_err!("can not update groups during blocks emitting");
         }
 
         if let Some(block_size) = self.block_size {
-            let before_add_group = |group_values: &mut VecDeque<Vec<T::Native>>| {
+            let before_add_group = |group_values: &mut Vec<Vec<T::Native>>| {
                 if group_values.is_empty()
-                    || group_values.back().unwrap().len() == block_size
+                    || group_values.last().unwrap().len() == block_size
                 {
                     let new_block = Vec::with_capacity(block_size);
-                    group_values.push_back(new_block);
+                    group_values.push(new_block);
                 }
             };
             self.get_or_create_groups::<_, BlockedGroupIndexOperations>(
@@ -182,7 +188,7 @@ where
             self.get_or_create_groups::<_, FlatGroupIndexOperations>(
                 cols,
                 groups,
-                |_: &mut VecDeque<Vec<T::Native>>| {},
+                |_: &mut Vec<Vec<T::Native>>| {},
             )
         }
     }
@@ -197,12 +203,12 @@ where
             let full_blocks_size = (num_blocks - 1)
                 * self
                     .values
-                    .front()
+                    .first()
                     .map(|blk| blk.len() * blk.allocated_size())
                     .unwrap_or_default();
             let last_block_size = self
                 .values
-                .back()
+                .last()
                 .map(|blk| blk.len() * blk.allocated_size())
                 .unwrap_or_default();
             full_blocks_size + last_block_size
@@ -249,7 +255,7 @@ where
 
                 self.map.clear();
                 build_primitive(
-                    std::mem::take(self.values.back_mut().unwrap()),
+                    mem::take(self.values.last_mut().unwrap()),
                     self.null_group.take().map(|idx| idx as usize),
                 )
             }
@@ -283,9 +289,9 @@ where
                     None => None,
                 };
 
-                let single_block = self.values.back_mut().unwrap();
+                let single_block = self.values.last_mut().unwrap();
                 let mut split = single_block.split_off(n as usize);
-                std::mem::swap(single_block, &mut split);
+                mem::swap(single_block, &mut split);
                 build_primitive(split, null_group.map(|idx| idx as usize))
             }
 
@@ -293,29 +299,30 @@ where
             // Emitting in blocked mode
             // ===============================================
             EmitTo::NextBlock => {
-                let block_size = self
-                    .block_size
-                    .expect("only support EmitTo::Next in blocked group values");
+                let (total_num_groups, block_size) = if !self.is_emitting() {
+                    // Similar as `EmitTo:All`, we will clear the old index infos both
+                    // in `map` and `null_group`
+                    self.map.clear();
+                    (
+                        self.num_groups,
+                        self.block_size
+                            .expect("only support EmitTo::Next in blocked group values"),
+                    )
+                } else {
+                    (0, 0)
+                };
 
-                // To mark the emitting has already started
-                self.emitting = true;
-
-                // Similar as `EmitTo:All`, we will clear the old index infos both
-                // in `map` and `null_group`
-                self.map.clear();
-
-                // Get current emit block
-                let emit_block = self.values.pop_front().ok_or_else(|| {
-                    internal_datafusion_err!("try to emit empty blocks")
-                })?;
-
-                if self.values.is_empty() {
-                    self.emitting = false;
-                }
+                let init_block_builder = || mem::take(&mut self.values);
+                let emit_block = self.emit_state.emit_block(
+                    total_num_groups,
+                    block_size,
+                    init_block_builder,
+                );
 
                 // Check if `null` is in current block:
                 //   - If so, we take it
                 //   - If not, we shift down the group index
+                let block_size = self.block_size.unwrap();
                 let null_group = match &mut self.null_group {
                     Some(v) if *v >= block_size => {
                         *v -= block_size;
@@ -347,7 +354,7 @@ where
         // we may need to consider it again when supporting spilling
         // for `blocked mode`.
         if self.block_size.is_none() {
-            let single_block = self.values.back_mut().unwrap();
+            let single_block = self.values.last_mut().unwrap();
             single_block.clear();
             single_block.shrink_to(count);
         } else {
@@ -360,7 +367,7 @@ where
         self.null_group = None;
 
         // Clear helping structures
-        self.emitting = false;
+        self.emit_state = EmitBlocksState::Init;
         self.num_groups = 0;
     }
 
@@ -377,13 +384,13 @@ where
         self.null_group = None;
 
         // Clear helping structures
-        self.emitting = false;
+        self.emit_state = EmitBlocksState::Init;
         self.num_groups = 0;
 
         // As mentioned above, we ensure the `single block` always exist
         // in `flat mode`
         if block_size.is_none() {
-            self.values.push_back(Vec::new());
+            self.values.push(Vec::new());
         }
         self.block_size = block_size;
 
@@ -402,7 +409,7 @@ where
         mut before_add_group: F,
     ) -> Result<()>
     where
-        F: FnMut(&mut VecDeque<Vec<T::Native>>),
+        F: FnMut(&mut Vec<Vec<T::Native>>),
         O: GroupIndexOperations,
     {
         assert_eq!(cols.len(), 1);
@@ -417,7 +424,7 @@ where
 
                     // Get block infos and update block,
                     // we need `current block` and `next offset in block`
-                    let current_block = self.values.back_mut().unwrap();
+                    let current_block = self.values.last_mut().unwrap();
                     current_block.push(Default::default());
 
                     // Compute group index
@@ -448,7 +455,7 @@ where
 
                             // Get block infos and update block,
                             // we need `current block` and `next offset in block`
-                            let current_block = self.values.back_mut().unwrap();
+                            let current_block = self.values.last_mut().unwrap();
                             current_block.push(key);
 
                             // Compute group index

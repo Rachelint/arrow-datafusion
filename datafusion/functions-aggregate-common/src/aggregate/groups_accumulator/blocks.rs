@@ -20,12 +20,16 @@
 use std::{
     collections::VecDeque,
     fmt::Debug,
-    iter,
+    iter, mem,
     ops::{Index, IndexMut},
     usize,
 };
 
 use datafusion_expr_common::groups_accumulator::EmitTo;
+
+// ========================================================================
+// Basic abstractions: `Blocks` and `Block`
+// ========================================================================
 
 /// Structure used to store aggregation intermediate results in `blocked approach`
 ///
@@ -38,23 +42,39 @@ use datafusion_expr_common::groups_accumulator::EmitTo;
 /// [`GroupsAccumulator::supports_blocked_groups`]: datafusion_expr_common::groups_accumulator::GroupsAccumulator::supports_blocked_groups
 ///
 #[derive(Debug)]
-pub struct Blocks<B: Block> {
-    inner: VecDeque<B>,
-    total_num_groups: usize,
+pub struct Blocks<B: Block, E: EmitBlockBuilder> {
+    /// Data in blocks
+    inner: Vec<B>,
+
+    /// Block size
+    ///
+    /// It states:
+    ///   - `Some(blk_size)`, it represents multiple block exists, each one
+    ///     has the `blk_size` len.
+    ///   - `None` , only single block exists.
     block_size: Option<usize>,
+
+    /// Total groups number in blocks
+    total_num_groups: usize,
+
+    emit_state: EmitBlocksState<E>,
 }
 
-impl<B: Block> Blocks<B> {
+impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
     #[inline]
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
-            inner: VecDeque::new(),
+            inner: Vec::new(),
             total_num_groups: 0,
             block_size,
+            emit_state: EmitBlocksState::Init,
         }
     }
 
+    /// Expand blocks to make it large enough to store `total_num_groups` groups,
+    /// and we fill the new allocated block with `default_val`
     pub fn expand(&mut self, total_num_groups: usize, default_val: B::T) {
+        assert!(!self.is_emitting(), "can not update groups during emitting");
         if self.total_num_groups >= total_num_groups {
             return;
         }
@@ -82,11 +102,44 @@ impl<B: Block> Blocks<B> {
         // `single block` not large enough, we allocate a larger one and copy
         // the exist data to it(such copy is really expansive).
         if self.block_size.is_none() {
-            let single_block = self.inner.back_mut().unwrap();
+            let single_block = self.inner.last_mut().unwrap();
             single_block.expand(total_num_groups, default_val.clone());
         }
 
         self.total_num_groups = total_num_groups;
+    }
+
+    /// Push block
+    pub fn push_block(&mut self, block: B) {
+        assert!(!self.is_emitting(), "can not update groups during emitting");
+        let block_len = block.len();
+        self.inner.push(block);
+        self.total_num_groups += block_len;
+    }
+
+    /// Emit block
+    ///
+    /// Because we don't know few about how to init the[`EmitBlockBuilder`],
+    /// so we expose `init_block_builder` to let the caller define it.
+    pub fn emit_block<F>(&mut self, mut init_block_builder: F) -> Option<B>
+    where
+        F: FnMut(&mut Vec<B>) -> E,
+    {
+        let (total_num_groups, block_size) = if !self.is_emitting() {
+            (self.total_num_groups, self.block_size.unwrap_or(usize::MAX))
+        } else {
+            (0, 0)
+        };
+
+        let emit_block = self
+            .emit_state
+            .emit_block(total_num_groups, block_size, || {
+                init_block_builder(&mut self.inner)
+            });
+
+        self.total_num_groups -= emit_block.len();
+
+        Some(emit_block)
     }
 
     #[inline]
@@ -99,26 +152,6 @@ impl<B: Block> Blocks<B> {
         self.total_num_groups
     }
 
-    pub fn push_block(&mut self, block: B) {
-        let block_len = block.len();
-        self.inner.push_back(block);
-        self.total_num_groups += block_len;
-    }
-
-    pub fn pop_block(&mut self) -> Option<B> {
-        let mut block = self.inner.pop_front()?;
-
-        // Check if it is the last block, if so maybe we need to truncate
-        // due to the last block may be non-full(len < `block_size`)
-        if self.inner.is_empty() {
-            let last_block_len = self.total_num_groups;
-            block.truncate(last_block_len);
-        }
-
-        self.total_num_groups -= block.len();
-        Some(block)
-    }
-
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &B> {
         self.inner.iter()
@@ -129,9 +162,14 @@ impl<B: Block> Blocks<B> {
         self.inner.clear();
         self.total_num_groups = 0;
     }
+
+    #[inline]
+    fn is_emitting(&self) -> bool {
+        self.emit_state.is_emitting()
+    }
 }
 
-impl<B: Block> Index<usize> for Blocks<B> {
+impl<B: Block, E: EmitBlockBuilder> Index<usize> for Blocks<B, E> {
     type Output = B;
 
     #[inline]
@@ -140,7 +178,7 @@ impl<B: Block> Index<usize> for Blocks<B> {
     }
 }
 
-impl<B: Block> IndexMut<usize> for Blocks<B> {
+impl<B: Block, E: EmitBlockBuilder> IndexMut<usize> for Blocks<B, E> {
     #[inline]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.inner[index]
@@ -190,9 +228,149 @@ impl<T> BuildBlockContext<T> {
     }
 }
 
+// ========================================================================
+// The common blocks emitting logic
+// ========================================================================
+
+/// Emit blocks state
+///
+/// There are two states:
+///   - Init, we can only update groups of [`BlockedNullState`]
+///     in this state
+///
+///   - Emitting, we can't update groups in this state until all
+///     blocks are emitted, and the state is reset to `Init`
+///
+#[derive(Debug)]
+pub enum EmitBlocksState<E: EmitBlockBuilder> {
+    Init,
+    Emitting(EmitBlocksContext<E>),
+}
+
+/// Emit blocks context
+#[derive(Debug)]
+pub struct EmitBlocksContext<E: EmitBlockBuilder> {
+    /// Index of next emitted block
+    pub next_emit_index: usize,
+
+    pub block_size: usize,
+
+    /// Number of blocks needed to emit
+    pub num_blocks: usize,
+
+    /// The len of last block
+    ///
+    /// Due to the last block is possibly non-full, so we compute
+    /// and store its len.
+    ///
+    pub last_block_len: usize,
+
+    /// Extension context
+    pub block_builder: E,
+}
+
+impl<E: EmitBlockBuilder> EmitBlocksState<E> {
+    pub fn emit_block<F>(
+        &mut self,
+        total_num_groups: usize,
+        block_size: usize,
+        mut init_block_builder: F,
+    ) -> E::B
+    where
+        F: FnMut() -> E,
+    {
+        let emit_block = loop {
+            match self {
+                Self::Init => {
+                    // Init needed contexts
+                    let num_blocks = total_num_groups.div_ceil(block_size);
+                    let mut last_block_len = total_num_groups % block_size;
+                    last_block_len = if last_block_len > 0 {
+                        last_block_len
+                    } else {
+                        block_size
+                    };
+
+                    let block_builder = init_block_builder();
+
+                    let emit_ctx = EmitBlocksContext {
+                        next_emit_index: 0,
+                        block_size,
+                        num_blocks,
+                        last_block_len,
+                        block_builder,
+                    };
+
+                    *self = Self::Emitting(emit_ctx);
+                }
+
+                Self::Emitting(EmitBlocksContext {
+                    next_emit_index,
+                    block_size,
+                    num_blocks,
+                    last_block_len,
+                    block_builder,
+                }) => {
+                    // Found empty blocks, return and reset directly
+                    if next_emit_index == num_blocks {
+                        let emit_block = block_builder.build(0, *block_size, true, 0);
+                        *self = Self::Init;
+                        break emit_block;
+                    }
+
+                    // Get current emit block idx
+                    let emit_index = *next_emit_index;
+                    // And then we advance the block idx
+                    *next_emit_index += 1;
+
+                    // Process and generate the emit block
+                    let is_last_block = next_emit_index == num_blocks;
+                    let emit_block = block_builder.build(
+                        emit_index,
+                        *block_size,
+                        is_last_block,
+                        *last_block_len,
+                    );
+
+                    // Finally we check if all blocks emitted, if so, we reset the
+                    // emit context to allow new updates
+                    if next_emit_index == num_blocks {
+                        *self = Self::Init;
+                    }
+
+                    break emit_block;
+                }
+            }
+        };
+
+        emit_block
+    }
+
+    #[inline]
+    pub fn is_emitting(&self) -> bool {
+        !matches!(self, Self::Init)
+    }
+}
+
+pub trait EmitBlockBuilder: Debug {
+    type B;
+
+    fn build(
+        &mut self,
+        emit_index: usize,
+        block_size: usize,
+        is_last_block: bool,
+        last_block_len: usize,
+    ) -> Self::B;
+}
+
+// ========================================================================
+// The most commonly used implementation `GeneralBlocks<T>`
+// ========================================================================
+
 /// Usually we use `Vec` to represent `Block`, so we define `Blocks<Vec<T>>`
 /// as the `GeneralBlocks<T>`
-pub type GeneralBlocks<T> = Blocks<Vec<T>>;
+pub type GeneralBlocks<T> = Blocks<Vec<T>, Vec<Vec<T>>>;
 
 /// As mentioned in [`GeneralBlocks`], we usually use `Vec` to represent `Block`,
 /// so we implement `Block` trait for `Vec`
@@ -229,12 +407,14 @@ impl<Ty: Clone + Debug> Block for Vec<Ty> {
 
 impl<T: Clone + Debug> GeneralBlocks<T> {
     pub fn emit(&mut self, emit_to: EmitTo) -> Vec<T> {
+        let init_block_builder = |inner: &mut Vec<Vec<T>>| mem::take(inner);
+
         if matches!(emit_to, EmitTo::NextBlock) {
             assert!(
                 self.block_size.is_some(),
                 "only support emit next block in blocked groups"
             );
-            self.pop_block()
+            self.emit_block(init_block_builder)
                 .expect("should not call emit for empty blocks")
         } else {
             // TODO: maybe remove `EmitTo::take_needed` and move the
@@ -245,23 +425,55 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
                 "only support emit all/first in flat groups"
             );
 
+            // We perform single block emitting through steps:
+            //   - Pop the `block` firstly
+            //   - Take `need rows` from `block`
+            //   - Push back the `block` if still some rows in it
             let mut block = self
-                .pop_block()
+                .emit_block(init_block_builder)
                 .expect("should not call emit for empty blocks");
+
             let emit_block = emit_to.take_needed(&mut block);
-            self.push_block(block);
+
+            if !block.is_empty() {
+                self.push_block(block);
+            }
 
             emit_block
         }
     }
 }
 
+impl<T: Debug> EmitBlockBuilder for Vec<Vec<T>> {
+    type B = Vec<T>;
+
+    fn build(
+        &mut self,
+        emit_index: usize,
+        _block_size: usize,
+        is_last_block: bool,
+        last_block_len: usize,
+    ) -> Self::B {
+        let mut emit_block = mem::take(&mut self[emit_index]);
+        if is_last_block {
+            emit_block.truncate(last_block_len);
+        }
+        emit_block
+    }
+}
+
 #[cfg(test)]
 mod test {
+    use super::EmitBlockBuilder;
     use crate::aggregate::groups_accumulator::blocks::Blocks;
 
-    type TestBlocks = Blocks<Vec<u32>>;
+    // type TestBlocks = Blocks<Vec<u32>>;
 
+    // #[test]
+    // fn test() {
+    //     let mut a = vec![vec!["".to_string()]];
+    //     a.build(0, 0, true, 0);
+    // }
     // #[test]
     // fn test_single_block_resize() {
     //     let new_block = |block_size: Option<usize>| {

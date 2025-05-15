@@ -27,6 +27,9 @@ use arrow::array::{Array, BooleanArray, BooleanBufferBuilder, PrimitiveArray};
 use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::datatypes::ArrowPrimitiveType;
 
+use crate::aggregate::groups_accumulator::blocks::{
+    EmitBlockBuilder, EmitBlocksContext, EmitBlocksState,
+};
 use crate::aggregate::groups_accumulator::group_index_operations::{
     BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,
 };
@@ -471,7 +474,7 @@ pub struct BlockedNullState {
     inner: NullState<BlockedGroupIndexOperations>,
 
     /// State used to control the blocks emitting
-    emit_state: EmitBlocksState,
+    emit_state: EmitBlocksState<BooleanBuffer>,
 }
 
 impl BlockedNullState {
@@ -532,129 +535,51 @@ impl BlockedNullState {
     }
 
     pub fn build(&mut self) -> NullBuffer {
-        let block_size = self.inner.block_size.unwrap();
-
-        let emit_block = loop {
-            match &mut self.emit_state {
-                EmitBlocksState::Init => {
-                    // Init needed contexts
-                    let buffer = self.inner.seen_values.finish();
-                    let num_blocks = buffer.len().div_ceil(block_size);
-                    let mut last_block_len = buffer.len() % block_size;
-                    last_block_len = if last_block_len > 0 {
-                        last_block_len
-                    } else {
-                        usize::MAX
-                    };
-
-                    let emit_ctx = EmitBlocksContext {
-                        next_emit_index: 0,
-                        num_blocks,
-                        last_block_len,
-                        buffer,
-                    };
-
-                    self.emit_state = EmitBlocksState::Emitting(emit_ctx);
-                }
-
-                EmitBlocksState::Emitting(EmitBlocksContext {
-                    next_emit_index,
-                    num_blocks,
-                    last_block_len,
-                    buffer,
-                }) => {
-                    // Found empty blocks, return and reset directly
-                    if next_emit_index == num_blocks {
-                        let emit_block = buffer.clone();
-                        self.emit_state = EmitBlocksState::Init;
-                        break emit_block;
-                    }
-
-                    // Get current emit block idx
-                    let emit_index = *next_emit_index;
-                    // And then we advance the block idx
-                    *next_emit_index += 1;
-
-                    // Process and generate the emit block
-                    let slice_offset = emit_index * block_size;
-                    let slice_len = if next_emit_index == num_blocks {
-                        cmp::min(*last_block_len, block_size)
-                    } else {
-                        block_size
-                    };
-                    let emit_block = buffer.slice(slice_offset, slice_len);
-
-                    // Finally we check if all blocks emitted, if so, we reset the
-                    // emit context to allow new updates
-                    if next_emit_index == num_blocks {
-                        self.emit_state = EmitBlocksState::Init;
-                    }
-
-                    break emit_block;
-                }
-            }
+        let (total_num_groups, block_size) = if !self.is_emitting() {
+            (self.inner.seen_values.len(), self.inner.block_size.unwrap())
+        } else {
+            (0, 0)
         };
+
+        let build_extension = || self.inner.seen_values.finish();
+        let emit_block =
+            self.emit_state
+                .emit_block(total_num_groups, block_size, build_extension);
 
         NullBuffer::new(emit_block)
     }
 
     #[inline]
     fn is_emitting(&self) -> bool {
-        !matches!(self.emit_state, EmitBlocksState::Init)
+        self.emit_state.is_emitting()
     }
 
+    #[inline]
     fn size(&self) -> usize {
-        self.inner.size() + self.emit_state.size()
+        // Unnecessary to take care of `emit_state`, it is just the intermediate
+        // data used during emitting
+        self.inner.size()
     }
 }
 
-/// Emit blocks state
-///
-/// There are two states:
-///   - Init, we can only update groups of [`BlockedNullState`]
-///     in this state
-///
-///   - Emitting, we can't update groups in this state until all
-///     blocks are emitted, and the state is reset to `Init`
-///
-#[derive(Debug)]
-enum EmitBlocksState {
-    Init,
-    Emitting(EmitBlocksContext),
-}
+impl EmitBlockBuilder for BooleanBuffer {
+    type B = BooleanBuffer;
 
-/// Emit blocks context
-#[derive(Debug)]
-struct EmitBlocksContext {
-    /// Index of next emitted block
-    pub next_emit_index: usize,
+    fn build(
+        &mut self,
+        emit_index: usize,
+        block_size: usize,
+        is_last_block: bool,
+        last_block_len: usize,
+    ) -> Self::B {
+        let slice_offset = emit_index * block_size;
+        let slice_len = if is_last_block {
+            last_block_len
+        } else {
+            block_size
+        };
 
-    /// Number of blocks needed to emit
-    pub num_blocks: usize,
-
-    /// The len of last block
-    ///
-    /// Due to the last block is possibly non-full, so we compute
-    /// and store its len.
-    ///
-    pub last_block_len: usize,
-
-    /// The total buffer built from [`NullState`]
-    ///
-    /// We will split it into multiple blocks(slices) according
-    /// to `block_size`, and then will perform emit block by block.
-    ///
-    pub buffer: BooleanBuffer,
-}
-
-impl EmitBlocksState {
-    fn size(&self) -> usize {
-        match self {
-            EmitBlocksState::Init => size_of::<Self>(),
-            EmitBlocksState::Emitting(EmitBlocksContext { buffer, .. }) => {
-                size_of::<Self>() + (buffer.len() / 8)
-            }
-        }
+        self.slice(slice_offset, slice_len)
     }
 }
 
