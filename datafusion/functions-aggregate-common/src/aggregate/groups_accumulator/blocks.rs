@@ -125,12 +125,11 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
         F: FnMut(&mut Vec<B>) -> E,
     {
         let (total_num_groups, block_size) = if !self.is_emitting() {
-            // When emitting start, all data(`inner`) will be taken into `emit_state`
-            // to consume iteratively until empty.
-            // So we should set the `total_num_groups` to 0 at the beginning.
-            let cur_total_num_groups = self.total_num_groups;
-            self.total_num_groups = 0;
-            (cur_total_num_groups, self.block_size.unwrap_or(usize::MAX))
+            // TODO: I think, we should set `total_num_groups` to 0 when blocks
+            // emitting starts. because it is used to represent number of `exist groups`,
+            // and I think `emitting groups` actually not exist anymore.
+            // But we still can't do it now for keep the same semantic with `GroupValues`.
+            (self.total_num_groups, self.block_size.unwrap_or(usize::MAX))
         } else {
             (0, 0)
         };
@@ -141,12 +140,15 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
                     init_block_builder(&mut self.inner)
                 })?;
 
+        self.total_num_groups -= emit_block.len();
+
         Some(emit_block)
     }
 
     #[inline]
     pub fn num_blocks(&self) -> usize {
-        self.inner.len()
+        self.total_num_groups
+            .div_ceil(self.block_size.unwrap_or(usize::MAX))
     }
 
     #[inline]
@@ -626,33 +628,39 @@ mod test {
             // Emit blocks, it is actually an alternative of `EmitTo::All`, so when we
             // start to emit the first block, contexts should be:
             //   - Emitted block 0: `[0, 1, 2]`
-            //   - Exist num blocks: 0
-            //   - Exist num groups: 0
+            //   - Exist num blocks: 3
+            //   - Exist num groups: 7
             //   - Emitting flag: true
             let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
-            assert_eq!(&emit_block, &[0, 1, 2]);
-            assert_eq!(blocks.num_blocks(), 0);
-            assert_eq!(blocks.total_num_groups(), 0);
+            assert_eq!(blocks.num_blocks(), 3);
+            assert_eq!(blocks.total_num_groups(), 7);
             assert!(blocks.is_emitting());
+            assert_eq!(&emit_block, &[0, 1, 2]);
 
             // Continue to emit rest 3 blocks, contexts to check:
+            //   - Exist num blocks checking
+            //   - Exist num groups checking
+            //   - Emitting flag checking
             //   - Emitted block 1: `[3, 4, 5]`
-            //   - Emitting flag: true
             //   - Emitted block 2: `[6, 7, 8]`
-            //   - Emitting flag: true
             //   - Emitted block 3: `[9]`
-            //   - Emitting flag: false
             let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
+            assert_eq!(blocks.num_blocks(), 2);
+            assert_eq!(blocks.total_num_groups(), 4);
+            assert!(blocks.is_emitting());
             assert_eq!(&emit_block, &[3, 4, 5]);
-            assert!(blocks.is_emitting());
 
             let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
+            assert_eq!(blocks.num_blocks(), 1);
+            assert_eq!(blocks.total_num_groups(), 1);
+            assert!(blocks.is_emitting());
             assert_eq!(&emit_block, &[6, 7, 8]);
-            assert!(blocks.is_emitting());
 
             let emit_block = blocks.emit(EmitTo::NextBlock).unwrap();
-            assert_eq!(&emit_block, &[9]);
+            assert_eq!(blocks.num_blocks(), 0);
+            assert_eq!(blocks.total_num_groups(), 0);
             assert!(!blocks.is_emitting());
+            assert_eq!(&emit_block, &[9]);
 
             // Check emit empty blocks
             assert!(blocks.emit(EmitTo::NextBlock).is_none());

@@ -250,14 +250,10 @@ where
                 );
 
                 self.map.clear();
-                let array = build_primitive(
+                build_primitive(
                     mem::take(self.values.last_mut().unwrap()),
                     self.null_group.take(),
-                );
-                // Maintain number of groups
-                self.total_num_groups -= array.len();
-
-                array
+                )
             }
 
             EmitTo::First(n) => {
@@ -292,11 +288,7 @@ where
                 let single_block = self.values.last_mut().unwrap();
                 let mut split = single_block.split_off(n);
                 mem::swap(single_block, &mut split);
-                let array = build_primitive(split, null_group);
-                // Maintain number of groups
-                self.total_num_groups -= array.len();
-
-                array
+                build_primitive(split, null_group)
             }
 
             // ===============================================
@@ -304,13 +296,16 @@ where
             // ===============================================
             EmitTo::NextBlock => {
                 let (total_num_groups, block_size) = if !self.is_emitting() {
-                    // Similar as `EmitTo:All`, we will clear the old index infos both
-                    // in `map`, `total_num_groups`
+                    // Similar as `EmitTo:All`, we will clear the old index infos(like `map`)
+                    // TODO: I think, we should set `total_num_groups` to 0 when blocks
+                    // emitting starts. because it is used to represent number of `exist groups`,
+                    // and I think `emitting groups` actually not exist anymore.
+                    // We can't do it due to we use `total_num_groups(len)` to judge when we
+                    // have emitted all blocks now. Actually we should judge it by checking
+                    // if `None` is return from `emit`.
                     self.map.clear();
-                    let cur_total_num_groups = self.total_num_groups;
-                    self.total_num_groups = 0;
                     (
-                        cur_total_num_groups,
+                        self.total_num_groups,
                         self.block_size
                             .expect("only support EmitTo::Next in blocked group values"),
                     )
@@ -346,6 +341,8 @@ where
                 build_primitive(emit_block, null_idx)
             }
         };
+
+        self.total_num_groups -= array.len();
 
         Ok(vec![Arc::new(array.with_data_type(self.data_type.clone()))])
     }
@@ -486,7 +483,7 @@ mod tests {
 
     use crate::aggregates::group_values::single_group_by::primitive::GroupValuesPrimitive;
     use crate::aggregates::group_values::GroupValues;
-    use arrow::array::{Array, AsArray, Datum, UInt32Array};
+    use arrow::array::{Array, AsArray, UInt32Array};
     use arrow::datatypes::{DataType, UInt32Type};
     use datafusion_expr::EmitTo;
 
@@ -689,12 +686,14 @@ mod tests {
         let expected = expected.into_iter().collect::<Vec<_>>();
 
         let emit_result0 = group_values.emit(EmitTo::NextBlock).unwrap();
-        assert_eq!(group_values.len(), 0);
-        assert!(group_values.is_empty());
+        assert_eq!(group_values.len(), 2);
+        assert!(!group_values.is_empty());
         assert!(group_values.is_emitting());
         assert_eq!(emit_result0[0].len(), block_size);
 
         let emit_result1 = group_values.emit(EmitTo::NextBlock).unwrap();
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
         assert!(!group_values.is_emitting());
         assert_eq!(emit_result1[0].len(), block_size);
 
@@ -727,12 +726,14 @@ mod tests {
         let expected = expected.into_iter().collect::<Vec<_>>();
 
         let emit_result0 = group_values.emit(EmitTo::NextBlock).unwrap();
-        assert_eq!(group_values.len(), 0);
-        assert!(group_values.is_empty());
+        assert_eq!(group_values.len(), 1);
+        assert!(!group_values.is_empty());
         assert!(group_values.is_emitting());
         assert_eq!(emit_result0[0].len(), block_size);
 
         let emit_result1 = group_values.emit(EmitTo::NextBlock).unwrap();
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
         assert!(!group_values.is_emitting());
         assert_eq!(emit_result1[0].len(), 1);
 
