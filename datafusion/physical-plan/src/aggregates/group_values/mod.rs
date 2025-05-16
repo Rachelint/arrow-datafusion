@@ -144,7 +144,7 @@ pub(crate) trait GroupValues: Send {
     /// set the block size to `blk_size`, and the try will only success
     /// when the `group values` has supported blocked mode.
     ///
-    /// NOTICE: After altering block size, all data in previous will be cleared.
+    /// NOTICE: After altering block size, all data in existing group values will be cleared.
     ///
     fn alter_block_size(&mut self, block_size: Option<usize>) -> Result<()> {
         if block_size.is_some() {

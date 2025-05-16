@@ -55,6 +55,7 @@ pub struct Blocks<B: Block, E: EmitBlockBuilder<B = B>> {
     /// Total groups number in blocks
     total_num_groups: usize,
 
+    /// Emit state used to control the emitting process
     emit_state: EmitBlocksState<E>,
 }
 
@@ -236,10 +237,9 @@ impl<T> BuildBlockContext<T> {
 /// Emit blocks state
 ///
 /// There are two states:
-///   - Init, we can only update groups of [`BlockedNullState`]
-///     in this state
+///   - Init, we can only update blocks in this state
 ///
-///   - Emitting, we can't update groups in this state until all
+///   - Emitting, we can't update blocks in this state until all
 ///     blocks are emitted, and the state is reset to `Init`
 ///
 #[derive(Debug)]
@@ -252,22 +252,23 @@ pub enum EmitBlocksState<E: EmitBlockBuilder> {
 #[derive(Debug)]
 pub struct EmitBlocksContext<E: EmitBlockBuilder> {
     /// Index of next emitted block
-    pub next_emit_index: usize,
+    next_emit_index: usize,
 
-    pub block_size: usize,
+    /// Block size of emitting [`Blocks`]
+    block_size: usize,
 
     /// Number of blocks needed to emit
-    pub num_blocks: usize,
+    num_blocks: usize,
 
     /// The len of last block
     ///
     /// Due to the last block is possibly non-full, so we compute
     /// and store its len.
     ///
-    pub last_block_len: usize,
+    last_block_len: usize,
 
-    /// Extension context
-    pub block_builder: E,
+    /// Emitted block builder
+    block_builder: E,
 }
 
 impl<E: EmitBlockBuilder> EmitBlocksState<E> {

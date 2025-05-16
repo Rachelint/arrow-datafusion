@@ -45,6 +45,7 @@ impl EmitTo {
     /// This avoids copying if Self::All
     ///
     /// NOTICE: only support emit strategies: `Self::All` and `Self::First`
+    /// Will call `panic` if called with `Self::NextBlock`
     ///
     pub fn take_needed<T>(&self, v: &mut Vec<T>) -> Vec<T> {
         match self {
@@ -292,7 +293,7 @@ pub trait GroupsAccumulator: Send {
     /// set the block size to `blk_size`, and the try will only success
     /// when the accumulator has supported blocked mode.
     ///
-    /// NOTICE: After altering block size, all data in previous will be cleared.
+    /// NOTICE: After altering block size, all data in existing accumulators will be cleared.
     ///
     fn alter_block_size(&mut self, block_size: Option<usize>) -> Result<()> {
         if block_size.is_some() {
