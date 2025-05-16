@@ -582,7 +582,7 @@ impl DataSource for FileScanConfig {
                 &file_scan
                     .projection
                     .clone()
-                    .unwrap_or((0..self.file_schema.fields().len()).collect()),
+                    .unwrap_or_else(|| (0..self.file_schema.fields().len()).collect()),
             );
             DataSourceExec::from_data_source(
                 FileScanConfigBuilder::from(file_scan)
@@ -2498,10 +2498,7 @@ mod tests {
                     avg_files_per_partition
                 );
 
-                println!(
-                    "Distribution - min files: {}, max files: {}",
-                    min_size, max_size
-                );
+                println!("Distribution - min files: {min_size}, max files: {max_size}");
             }
         }
 

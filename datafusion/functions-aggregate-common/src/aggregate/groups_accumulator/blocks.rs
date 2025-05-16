@@ -40,7 +40,7 @@ use datafusion_expr_common::groups_accumulator::EmitTo;
 /// [`GroupsAccumulator::supports_blocked_groups`]: datafusion_expr_common::groups_accumulator::GroupsAccumulator::supports_blocked_groups
 ///
 #[derive(Debug)]
-pub struct Blocks<B: Block, E: EmitBlockBuilder> {
+pub struct Blocks<B: Block, E: EmitBlockBuilder<B = B>> {
     /// Data in blocks
     inner: Vec<B>,
 
@@ -170,7 +170,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
     }
 }
 
-impl<B: Block, E: EmitBlockBuilder> Index<usize> for Blocks<B, E> {
+impl<B: Block, E: EmitBlockBuilder<B = B>> Index<usize> for Blocks<B, E> {
     type Output = B;
 
     #[inline]
@@ -179,7 +179,7 @@ impl<B: Block, E: EmitBlockBuilder> Index<usize> for Blocks<B, E> {
     }
 }
 
-impl<B: Block, E: EmitBlockBuilder> IndexMut<usize> for Blocks<B, E> {
+impl<B: Block, E: EmitBlockBuilder<B = B>> IndexMut<usize> for Blocks<B, E> {
     #[inline]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.inner[index]

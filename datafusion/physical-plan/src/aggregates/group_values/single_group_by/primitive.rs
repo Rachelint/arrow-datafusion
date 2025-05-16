@@ -125,7 +125,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     /// So Even it will introduce some complexity of maintain, it still
     /// be worthy to do that.
     ///
-    num_groups: usize,
+    total_num_groups: usize,
 
     /// Flag used in emitting in `blocked approach`
     /// Mark if it is during blocks emitting, if so states can't
@@ -146,7 +146,7 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             null_group: None,
             random_state: Default::default(),
             block_size: None,
-            num_groups: 0,
+            total_num_groups: 0,
             emit_state: EmitBlocksState::Init,
         }
     }
@@ -220,7 +220,7 @@ where
     }
 
     fn len(&self) -> usize {
-        self.num_groups
+        self.total_num_groups
     }
 
     fn emit(&mut self, emit_to: EmitTo) -> Result<Vec<ArrayRef>> {
@@ -250,10 +250,14 @@ where
                 );
 
                 self.map.clear();
-                build_primitive(
+                let array = build_primitive(
                     mem::take(self.values.last_mut().unwrap()),
                     self.null_group.take(),
-                )
+                );
+                // Maintain number of groups
+                self.total_num_groups -= array.len();
+
+                array
             }
 
             EmitTo::First(n) => {
@@ -288,7 +292,11 @@ where
                 let single_block = self.values.last_mut().unwrap();
                 let mut split = single_block.split_off(n);
                 mem::swap(single_block, &mut split);
-                build_primitive(split, null_group)
+                let array = build_primitive(split, null_group);
+                // Maintain number of groups
+                self.total_num_groups -= array.len();
+
+                array
             }
 
             // ===============================================
@@ -297,10 +305,12 @@ where
             EmitTo::NextBlock => {
                 let (total_num_groups, block_size) = if !self.is_emitting() {
                     // Similar as `EmitTo:All`, we will clear the old index infos both
-                    // in `map` and `null_group`
+                    // in `map`, `total_num_groups`
                     self.map.clear();
+                    let cur_total_num_groups = self.total_num_groups;
+                    self.total_num_groups = 0;
                     (
-                        self.num_groups,
+                        cur_total_num_groups,
                         self.block_size
                             .expect("only support EmitTo::Next in blocked group values"),
                     )
@@ -337,9 +347,6 @@ where
             }
         };
 
-        // Maintain number of groups
-        self.num_groups -= array.len();
-
         Ok(vec![Arc::new(array.with_data_type(self.data_type.clone()))])
     }
 
@@ -365,7 +372,7 @@ where
 
         // Clear helping structures
         self.emit_state = EmitBlocksState::Init;
-        self.num_groups = 0;
+        self.total_num_groups = 0;
     }
 
     fn supports_blocked_groups(&self) -> bool {
@@ -382,7 +389,7 @@ where
 
         // Clear helping structures
         self.emit_state = EmitBlocksState::Init;
-        self.num_groups = 0;
+        self.total_num_groups = 0;
 
         // As mentioned above, we ensure the `single block` always exist
         // in `flat mode`
@@ -425,8 +432,8 @@ where
                     current_block.push(Default::default());
 
                     // Compute group index
-                    let group_index = self.num_groups;
-                    self.num_groups += 1;
+                    let group_index = self.total_num_groups;
+                    self.total_num_groups += 1;
 
                     // Get group index and finish actions needed it
                     group_index
@@ -456,8 +463,8 @@ where
                             current_block.push(key);
 
                             // Compute group index
-                            let group_index = self.num_groups;
-                            self.num_groups += 1;
+                            let group_index = self.total_num_groups;
+                            self.total_num_groups += 1;
 
                             v.insert((group_index, hash));
                             group_index
