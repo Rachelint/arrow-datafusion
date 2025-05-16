@@ -486,7 +486,7 @@ mod tests {
 
     use crate::aggregates::group_values::single_group_by::primitive::GroupValuesPrimitive;
     use crate::aggregates::group_values::GroupValues;
-    use arrow::array::{AsArray, UInt32Array};
+    use arrow::array::{Array, AsArray, Datum, UInt32Array};
     use arrow::datatypes::{DataType, UInt32Type};
     use datafusion_expr::EmitTo;
 
@@ -502,10 +502,14 @@ mod tests {
         //   2.1 Emit first n
         //   2.2 Emit all
         //   2.3 Insert again + emit
-        let mut group_values = GroupValuesPrimitive::<UInt32Type>::new(DataType::UInt32);
-        let mut group_indices = vec![];
+        //
 
-        let data1 = Arc::new(UInt32Array::from(vec![
+        let mut group_values = GroupValuesPrimitive::<UInt32Type>::new(DataType::UInt32);
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
+
+        let mut group_indices = vec![];
+        let data0 = Arc::new(UInt32Array::from(vec![
             Some(1),
             None,
             Some(1),
@@ -513,15 +517,31 @@ mod tests {
             Some(2),
             Some(3),
         ]));
-        let data2 = Arc::new(UInt32Array::from(vec![Some(3), None, Some(4), Some(5)]));
+        let data1 = Arc::new(UInt32Array::from(vec![
+            Some(3),
+            Some(3),
+            None,
+            Some(4),
+            Some(5),
+        ]));
 
-        // Insert case 1.1, 1.3, 1.4 + Emit case 2.1
+        // 1. Insert case 1.1, 1.3, 1.4 + Emit case 2.1, 2.2
+
+        // 1.1 Insert data0, contexts to check:
+        //   - Exist num groups: 4
+        //   - Exist groups empty: false
         group_values
-            .intern(&[Arc::clone(&data1) as _], &mut group_indices)
+            .intern(&[Arc::clone(&data0) as _], &mut group_indices)
             .unwrap();
+        assert_eq!(group_values.len(), 4);
+        assert!(!group_values.is_empty());
 
+        // 1.2 Emit first 3 groups, contexts to check:
+        //   - Exist num groups: 1
+        //   - Exist groups empty: false
+        //   - Emitted groups are top 3 data sorted by their before group indices
         let mut expected = BTreeMap::new();
-        for (&group_index, value) in group_indices.iter().zip(data1.iter()) {
+        for (&group_index, value) in group_indices.iter().zip(data0.iter()) {
             expected.insert(group_index, value);
         }
         let mut expected = expected.into_iter().collect::<Vec<_>>();
@@ -530,6 +550,8 @@ mod tests {
         expected.pop();
 
         let emit_result = group_values.emit(EmitTo::First(3)).unwrap();
+        assert_eq!(group_values.len(), 1);
+        assert!(!group_values.is_empty());
         let actual = emit_result[0]
             .as_primitive::<UInt32Type>()
             .iter()
@@ -542,28 +564,75 @@ mod tests {
 
         assert_eq!(expected, actual);
 
-        // Insert case 1.1~1.3 + Emit case 2.2~2.3
-        group_values
-            .intern(&[Arc::clone(&data2) as _], &mut group_indices)
-            .unwrap();
+        // 1.3 Emit last 1 group(by emitting all), contexts to check:
+        //   - Exist num groups: 0
+        //   - Exist groups empty: true
+        //   - Emitted group equal to `last_value`
+        let emit_result = group_values.emit(EmitTo::All).unwrap();
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
+        let emit_col = emit_result[0].as_primitive::<UInt32Type>();
+        let actual = emit_col.is_valid(0).then(|| emit_col.value(0));
+        assert_eq!(actual, last_value);
 
+        // 2. Insert case 1.1, 1.2, 1.3 + Emit case 2.1, 2.2, 2.3
+
+        // 2.1 Insert data1, contexts to check:
+        //   - Exist num groups: 4
+        //   - Exist groups empty: false
+        group_values
+            .intern(&[Arc::clone(&data1) as _], &mut group_indices)
+            .unwrap();
+        assert_eq!(group_values.len(), 4);
+        assert!(!group_values.is_empty());
+
+        // 2.2 Emit first 2 groups, contexts to check:
+        //   - Exist num groups: 2
+        //   - Exist groups empty: false
+        //   - Emitted groups are top 2 data sorted by their before group indices
         let mut expected = BTreeMap::new();
-        for (&group_index, value) in group_indices.iter().zip(data2.iter()) {
-            if group_index == 0 {
-                assert_eq!(last_value, value);
-            }
+        for (&group_index, value) in group_indices.iter().zip(data1.iter()) {
             expected.insert(group_index, value);
         }
-        let expected = expected.into_iter().collect::<Vec<_>>();
+        let mut expected = expected.into_iter().collect::<Vec<_>>();
+        let mut last_twos = Vec::new();
+        let last_value0 = expected.pop().unwrap().1;
+        let last_value1 = expected.pop().unwrap().1;
+        last_twos.extend([(0, last_value1), (1, last_value0)]);
 
-        let emit_result = group_values.emit(EmitTo::All).unwrap();
+        let emit_result = group_values.emit(EmitTo::First(2)).unwrap();
+        assert_eq!(group_values.len(), 2);
+        assert!(!group_values.is_empty());
         let actual = emit_result[0]
             .as_primitive::<UInt32Type>()
             .iter()
             .enumerate()
+            .map(|(group_idx, val)| {
+                assert!(group_idx < last_group_index);
+                (group_idx, val)
+            })
             .collect::<Vec<_>>();
 
-        assert_eq!(expected, actual);
+        assert_eq!(actual, expected);
+
+        // 2.3 Emit last 2 group(by emitting all), contexts to check:
+        //   - Exist num groups: 0
+        //   - Exist groups empty: true
+        //   - Emitted groups equal to `last_twos`
+        let emit_result = group_values.emit(EmitTo::All).unwrap();
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
+        let actual = emit_result[0]
+            .as_primitive::<UInt32Type>()
+            .iter()
+            .enumerate()
+            .map(|(group_idx, val)| {
+                assert!(group_idx < last_group_index);
+                (group_idx, val)
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, last_twos);
     }
 
     #[test]
@@ -575,15 +644,18 @@ mod tests {
         //   1.4 Null row + non-distinct
         //
         // Will cover such emit cases:
-        //   2.1 Emit block
-        //   2.2 Insert again + emit block
+        //   2.1 Emit block + `num_groups % block_size == 0`
+        //   2.2 Insert again + emit block + `num_groups % block_size != 0`
         //
+
         let mut group_values = GroupValuesPrimitive::<UInt32Type>::new(DataType::UInt32);
         let block_size = 2;
         group_values.alter_block_size(Some(block_size)).unwrap();
-        let mut group_indices = vec![];
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
 
-        let data1 = Arc::new(UInt32Array::from(vec![
+        let mut group_indices = vec![];
+        let data0 = Arc::new(UInt32Array::from(vec![
             Some(1),
             None,
             Some(1),
@@ -591,48 +663,82 @@ mod tests {
             Some(2),
             Some(3),
         ]));
-        let data2 = Arc::new(UInt32Array::from(vec![Some(3), None, Some(4)]));
+        let data1 = Arc::new(UInt32Array::from(vec![Some(3), None, Some(4)]));
 
-        // Insert case 1.1, 1.3, 1.4 + Emit case 2.1
+        // 1. Insert case 1.1, 1.3, 1.4 + Emit case 2.1
+
+        // 1.1 Insert data0, contexts to check:
+        //   - Exist num groups: 4
+        //   - Exist groups empty: false
+        group_values
+            .intern(&[Arc::clone(&data0) as _], &mut group_indices)
+            .unwrap();
+        assert_eq!(group_values.len(), 4);
+        assert!(!group_values.is_empty());
+
+        // 1.2 Emit blocks, contexts to check:
+        //   - Exist num groups: 0
+        //   - Exist groups empty: true
+        //   - Emitting flag check,
+        //   - Emitted block len check
+        //   - Emitted groups are equal to data sorted by their before group indices
+        let mut expected = BTreeMap::new();
+        for (&group_index, value) in group_indices.iter().zip(data0.iter()) {
+            expected.insert(group_index, value);
+        }
+        let expected = expected.into_iter().collect::<Vec<_>>();
+
+        let emit_result0 = group_values.emit(EmitTo::NextBlock).unwrap();
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
+        assert!(group_values.is_emitting());
+        assert_eq!(emit_result0[0].len(), block_size);
+
+        let emit_result1 = group_values.emit(EmitTo::NextBlock).unwrap();
+        assert!(!group_values.is_emitting());
+        assert_eq!(emit_result1[0].len(), block_size);
+
+        let iter0 = emit_result0[0].as_primitive::<UInt32Type>().iter();
+        let iter1 = emit_result1[0].as_primitive::<UInt32Type>().iter();
+        let actual = iter0.chain(iter1).enumerate().collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        // 2. Insert case 1.1, 1.2 + Emit case 2.2
+
+        // 2.1 Insert data0, contexts to check:
+        //   - Exist num groups: 3
+        //   - Exist groups empty: false
         group_values
             .intern(&[Arc::clone(&data1) as _], &mut group_indices)
             .unwrap();
+        assert_eq!(group_values.len(), 3);
+        assert!(!group_values.is_empty());
 
+        // 1.2 Emit blocks, contexts to check:
+        //   - Exist num groups: 0
+        //   - Exist groups empty: true
+        //   - Emitting flag check,
+        //   - Emitted block len check
+        //   - Emitted groups are equal to data sorted by their before group indices
         let mut expected = BTreeMap::new();
         for (&group_index, value) in group_indices.iter().zip(data1.iter()) {
             expected.insert(group_index, value);
         }
         let expected = expected.into_iter().collect::<Vec<_>>();
 
-        let emit_result1 = group_values.emit(EmitTo::NextBlock).unwrap();
-        assert_eq!(emit_result1[0].len(), block_size);
-        let emit_result2 = group_values.emit(EmitTo::NextBlock).unwrap();
-        assert_eq!(emit_result2[0].len(), block_size);
-        let iter1 = emit_result1[0].as_primitive::<UInt32Type>().iter();
-        let iter2 = emit_result2[0].as_primitive::<UInt32Type>().iter();
-        let actual = iter1.chain(iter2).enumerate().collect::<Vec<_>>();
-
-        assert_eq!(actual, expected);
-
-        // Insert case 1.1~1.2 + Emit case 2.2
-        group_values
-            .intern(&[Arc::clone(&data2) as _], &mut group_indices)
-            .unwrap();
-
-        let mut expected = BTreeMap::new();
-        for (&group_index, value) in group_indices.iter().zip(data2.iter()) {
-            expected.insert(group_index, value);
-        }
-        let expected = expected.into_iter().collect::<Vec<_>>();
+        let emit_result0 = group_values.emit(EmitTo::NextBlock).unwrap();
+        assert_eq!(group_values.len(), 0);
+        assert!(group_values.is_empty());
+        assert!(group_values.is_emitting());
+        assert_eq!(emit_result0[0].len(), block_size);
 
         let emit_result1 = group_values.emit(EmitTo::NextBlock).unwrap();
-        assert_eq!(emit_result1[0].len(), block_size);
-        let emit_result2 = group_values.emit(EmitTo::NextBlock).unwrap();
-        assert_eq!(emit_result2[0].len(), 1);
-        let iter1 = emit_result1[0].as_primitive::<UInt32Type>().iter();
-        let iter2 = emit_result2[0].as_primitive::<UInt32Type>().iter();
-        let actual = iter1.chain(iter2).enumerate().collect::<Vec<_>>();
+        assert!(!group_values.is_emitting());
+        assert_eq!(emit_result1[0].len(), 1);
 
+        let iter0 = emit_result0[0].as_primitive::<UInt32Type>().iter();
+        let iter1 = emit_result1[0].as_primitive::<UInt32Type>().iter();
+        let actual = iter0.chain(iter1).enumerate().collect::<Vec<_>>();
         assert_eq!(actual, expected);
     }
 }
