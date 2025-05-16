@@ -18,11 +18,9 @@
 //! Aggregation intermediate results blocks in blocked approach
 
 use std::{
-    collections::VecDeque,
     fmt::Debug,
     iter, mem,
     ops::{Index, IndexMut},
-    usize,
 };
 
 use datafusion_expr_common::groups_accumulator::EmitTo;
@@ -460,13 +458,10 @@ impl<T: Debug> EmitBlockBuilder for Vec<Vec<T>> {
 
 #[cfg(test)]
 mod test {
-    use std::usize;
-
     use datafusion_expr_common::groups_accumulator::EmitTo;
 
-    use super::EmitBlockBuilder;
     use crate::aggregate::groups_accumulator::{
-        blocks::{Blocks, GeneralBlocks},
+        blocks::GeneralBlocks,
         group_index_operations::{
             BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,
         },

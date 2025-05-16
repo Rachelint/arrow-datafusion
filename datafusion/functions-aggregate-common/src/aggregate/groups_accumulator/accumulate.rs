@@ -19,7 +19,6 @@
 //!
 //! [`GroupsAccumulator`]: datafusion_expr_common::groups_accumulator::GroupsAccumulator
 
-use std::cmp;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 
@@ -27,9 +26,7 @@ use arrow::array::{Array, BooleanArray, BooleanBufferBuilder, PrimitiveArray};
 use arrow::buffer::{BooleanBuffer, NullBuffer};
 use arrow::datatypes::ArrowPrimitiveType;
 
-use crate::aggregate::groups_accumulator::blocks::{
-    EmitBlockBuilder, EmitBlocksContext, EmitBlocksState,
-};
+use crate::aggregate::groups_accumulator::blocks::{EmitBlockBuilder, EmitBlocksState};
 use crate::aggregate::groups_accumulator::group_index_operations::{
     BlockedGroupIndexOperations, FlatGroupIndexOperations, GroupIndexOperations,
 };

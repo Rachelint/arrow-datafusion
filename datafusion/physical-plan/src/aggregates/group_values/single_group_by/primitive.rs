@@ -33,7 +33,6 @@ use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_
 };
 use half::f16;
 use hashbrown::hash_table::HashTable;
-use std::collections::VecDeque;
 use std::mem::{self, size_of};
 use std::sync::Arc;
 
@@ -140,13 +139,10 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
 
         // As a optimization, we ensure the `single block` always exist
         // in flat mode, it can eliminate an expansive row-level empty checking
-        let mut values = Vec::new();
-        values.push(Vec::new());
-
         Self {
             data_type,
             map: HashTable::with_capacity(128),
-            values,
+            values: vec![vec![]],
             null_group: None,
             random_state: Default::default(),
             block_size: None,
@@ -256,7 +252,7 @@ where
                 self.map.clear();
                 build_primitive(
                     mem::take(self.values.last_mut().unwrap()),
-                    self.null_group.take().map(|idx| idx as usize),
+                    self.null_group.take(),
                 )
             }
 
@@ -290,9 +286,9 @@ where
                 };
 
                 let single_block = self.values.last_mut().unwrap();
-                let mut split = single_block.split_off(n as usize);
+                let mut split = single_block.split_off(n);
                 mem::swap(single_block, &mut split);
-                build_primitive(split, null_group.map(|idx| idx as usize))
+                build_primitive(split, null_group)
             }
 
             // ===============================================
@@ -483,13 +479,9 @@ mod tests {
 
     use crate::aggregates::group_values::single_group_by::primitive::GroupValuesPrimitive;
     use crate::aggregates::group_values::GroupValues;
-    use arrow::array::{AsArray, RecordBatch, UInt32Array};
+    use arrow::array::{AsArray, UInt32Array};
     use arrow::datatypes::{DataType, UInt32Type};
-    use arrow_schema::Schema;
     use datafusion_expr::EmitTo;
-    use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_index_operations::{
-        BlockedGroupIndexOperations, GroupIndexOperations,
-    };
 
     #[test]
     fn test_flat_primitive_group_values() {
@@ -601,12 +593,7 @@ mod tests {
 
         let mut expected = BTreeMap::new();
         for (&group_index, value) in group_indices.iter().zip(data1.iter()) {
-            let block_id =
-                BlockedGroupIndexOperations::get_block_id(group_index, block_size);
-            let block_offset =
-                BlockedGroupIndexOperations::get_block_offset(group_index, block_size);
-            let flatten_index = block_id as usize * block_size + block_offset as usize;
-            expected.insert(flatten_index, value);
+            expected.insert(group_index, value);
         }
         let expected = expected.into_iter().collect::<Vec<_>>();
 
@@ -627,12 +614,7 @@ mod tests {
 
         let mut expected = BTreeMap::new();
         for (&group_index, value) in group_indices.iter().zip(data2.iter()) {
-            let block_id =
-                BlockedGroupIndexOperations::get_block_id(group_index, block_size);
-            let block_offset =
-                BlockedGroupIndexOperations::get_block_offset(group_index, block_size);
-            let flatten_index = block_id as usize * block_size + block_offset as usize;
-            expected.insert(flatten_index, value);
+            expected.insert(group_index, value);
         }
         let expected = expected.into_iter().collect::<Vec<_>>();
 
