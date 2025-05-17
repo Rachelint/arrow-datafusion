@@ -107,7 +107,7 @@ where
             opt_filter,
             total_num_groups,
             |block_id, block_offset, new_value| {
-                let value = &mut self.values[block_id][block_offset];
+                let value = self.values.get_mut(block_id, block_offset);
                 (self.prim_fn)(value, new_value);
             },
         );
