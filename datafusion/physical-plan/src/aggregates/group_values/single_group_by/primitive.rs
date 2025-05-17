@@ -175,17 +175,12 @@ where
                     group_values.push(new_block);
                 }
             };
-            self.get_or_create_groups::<_, BlockedGroupIndexOperations>(
-                cols,
-                groups,
-                before_add_group,
-            )
+
+            let group_index_operation = BlockedGroupIndexOperations::new(block_size);
+            self.get_or_create_groups(cols, groups, before_add_group, group_index_operation)
         } else {
-            self.get_or_create_groups::<_, FlatGroupIndexOperations>(
-                cols,
-                groups,
-                |_: &mut Vec<Vec<T::Native>>| {},
-            )
+            let group_index_operation = FlatGroupIndexOperations;
+            self.get_or_create_groups(cols, groups, |_: &mut Vec<Vec<T::Native>>| {}, group_index_operation)
         }
     }
 
@@ -335,7 +330,9 @@ where
                 };
 
                 let null_idx = null_group.map(|group_idx| {
-                    BlockedGroupIndexOperations::get_block_offset(group_idx, block_size)
+                    let group_index_operation =
+                        BlockedGroupIndexOperations::new(block_size);
+                    group_index_operation.get_block_offset(group_idx)
                 });
 
                 build_primitive(emit_block, null_idx)
@@ -377,6 +374,10 @@ where
     }
 
     fn alter_block_size(&mut self, block_size: Option<usize>) -> Result<()> {
+        block_size
+            .as_ref()
+            .map(|blk_size| assert!(blk_size.is_power_of_two()));
+
         // Clear values
         self.values.clear();
 
@@ -408,6 +409,7 @@ where
         cols: &[ArrayRef],
         groups: &mut Vec<usize>,
         mut before_add_group: F,
+        group_index_operation: O,
     ) -> Result<()>
     where
         F: FnMut(&mut Vec<Vec<T::Native>>),
@@ -441,8 +443,9 @@ where
                     let insert = self.map.entry(
                         hash,
                         |g| unsafe {
-                            let block_id = O::get_block_id(g.0, block_size);
-                            let block_offset = O::get_block_offset(g.0, block_size);
+                            let block_id = group_index_operation.get_block_id(g.0);
+                            let block_offset =
+                                group_index_operation.get_block_offset(g.0);
                             self.values[block_id].get_unchecked(block_offset).is_eq(key)
                         },
                         |g| g.1,

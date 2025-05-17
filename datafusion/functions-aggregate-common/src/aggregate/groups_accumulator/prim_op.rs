@@ -209,6 +209,10 @@ where
     }
 
     fn alter_block_size(&mut self, block_size: Option<usize>) -> Result<()> {
+        block_size
+            .as_ref()
+            .map(|blk_size| assert!(blk_size.is_power_of_two()));
+
         self.values.clear();
         self.values = Blocks::new(block_size);
         self.null_state = NullStateAdapter::new(block_size);

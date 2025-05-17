@@ -88,7 +88,7 @@ pub struct NullState<O: GroupIndexOperations> {
     block_size: Option<usize>,
 
     /// phantom data for required type `<O>`
-    _phantom: PhantomData<O>,
+    group_index_operation: O,
 }
 
 impl<O: GroupIndexOperations> NullState<O> {
@@ -131,8 +131,8 @@ impl<O: GroupIndexOperations> NullState<O> {
             initialize_builder(&mut self.seen_values, total_num_groups, false);
         let block_size = self.block_size.unwrap_or_default();
         accumulate(group_indices, values, opt_filter, |group_index, value| {
-            let block_id = O::get_block_id(group_index, block_size);
-            let block_offset = O::get_block_offset(group_index, block_size);
+            let block_id = self.group_index_operation.get_block_id(group_index);
+            let block_offset = self.group_index_operation.get_block_offset(group_index);
             seen_values.set_bit(group_index, true);
             value_fn(block_id, block_offset, value);
         });
@@ -174,8 +174,10 @@ impl<O: GroupIndexOperations> NullState<O> {
                 // buffer is big enough (start everything at valid)
                 group_indices.iter().zip(data.iter()).for_each(
                     |(&group_index, new_value)| {
-                        let block_id = O::get_block_id(group_index, block_size);
-                        let block_offset = O::get_block_offset(group_index, block_size);
+                        let block_id =
+                            self.group_index_operation.get_block_id(group_index);
+                        let block_offset =
+                            self.group_index_operation.get_block_offset(group_index);
                         seen_values.set_bit(group_index, true);
                         value_fn(block_id, block_offset, new_value)
                     },
@@ -190,9 +192,10 @@ impl<O: GroupIndexOperations> NullState<O> {
                     .zip(nulls.iter())
                     .for_each(|((&group_index, new_value), is_valid)| {
                         if is_valid {
-                            let block_id = O::get_block_id(group_index, block_size);
+                            let block_id =
+                                self.group_index_operation.get_block_id(group_index);
                             let block_offset =
-                                O::get_block_offset(group_index, block_size);
+                                self.group_index_operation.get_block_offset(group_index);
                             seen_values.set_bit(group_index, true);
                             value_fn(block_id, block_offset, new_value);
                         }
@@ -208,9 +211,10 @@ impl<O: GroupIndexOperations> NullState<O> {
                     .zip(filter.iter())
                     .for_each(|((&group_index, new_value), filter_value)| {
                         if let Some(true) = filter_value {
-                            let block_id = O::get_block_id(group_index, block_size);
+                            let block_id =
+                                self.group_index_operation.get_block_id(group_index);
                             let block_offset =
-                                O::get_block_offset(group_index, block_size);
+                                self.group_index_operation.get_block_offset(group_index);
                             seen_values.set_bit(group_index, true);
                             value_fn(block_id, block_offset, new_value);
                         }
@@ -226,9 +230,11 @@ impl<O: GroupIndexOperations> NullState<O> {
                     .for_each(|((filter_value, &group_index), new_value)| {
                         if let Some(true) = filter_value {
                             if let Some(new_value) = new_value {
-                                let block_id = O::get_block_id(group_index, block_size);
-                                let block_offset =
-                                    O::get_block_offset(group_index, block_size);
+                                let block_id =
+                                    self.group_index_operation.get_block_id(group_index);
+                                let block_offset = self
+                                    .group_index_operation
+                                    .get_block_offset(group_index);
                                 seen_values.set_bit(group_index, true);
                                 value_fn(block_id, block_offset, new_value);
                             }
@@ -409,7 +415,7 @@ impl Default for FlatNullState {
         Self {
             seen_values: BooleanBufferBuilder::new(0),
             block_size: None,
-            _phantom: PhantomData,
+            group_index_operation: FlatGroupIndexOperations,
         }
     }
 }
@@ -479,7 +485,7 @@ impl BlockedNullState {
         let inner = NullState {
             seen_values: BooleanBufferBuilder::new(0),
             block_size: Some(block_size),
-            _phantom: PhantomData {},
+            group_index_operation: BlockedGroupIndexOperations::new(block_size),
         };
 
         Self {

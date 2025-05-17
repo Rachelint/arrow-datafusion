@@ -48,22 +48,42 @@ use std::fmt::Debug;
 /// The `get_block_offset` method requires to return `block_offset` as u64,
 /// that is for compatible for `flat group index`'s parsing.
 ///
-pub trait GroupIndexOperations: Debug {
-    fn get_block_id(group_index: usize, block_size: usize) -> usize;
+pub trait GroupIndexOperations: Debug + Send + Sync {
+    fn get_block_id(&self, group_index: usize) -> usize;
 
-    fn get_block_offset(group_index: usize, block_size: usize) -> usize;
+    fn get_block_offset(&self, group_index: usize) -> usize;
 }
 
 #[derive(Debug)]
-pub struct BlockedGroupIndexOperations;
+pub struct BlockedGroupIndexOperations {
+    block_size: usize,
+    exponent: usize,
+}
+
+impl BlockedGroupIndexOperations {
+    #[inline]
+    pub fn new(block_size: usize) -> Self {
+        assert!(
+            block_size.is_power_of_two(),
+            "block size must be power of two"
+        );
+        let exponent = block_size.trailing_zeros() as usize;
+        Self {
+            block_size,
+            exponent,
+        }
+    }
+}
 
 impl GroupIndexOperations for BlockedGroupIndexOperations {
-    fn get_block_id(group_index: usize, block_size: usize) -> usize {
-        group_index / block_size
+    #[inline]
+    fn get_block_id(&self, group_index: usize) -> usize {
+        group_index >> self.exponent
     }
 
-    fn get_block_offset(group_index: usize, block_size: usize) -> usize {
-        group_index % block_size
+    #[inline]
+    fn get_block_offset(&self, group_index: usize) -> usize {
+        group_index & (self.block_size - 1)
     }
 }
 
@@ -71,11 +91,13 @@ impl GroupIndexOperations for BlockedGroupIndexOperations {
 pub struct FlatGroupIndexOperations;
 
 impl GroupIndexOperations for FlatGroupIndexOperations {
-    fn get_block_id(_group_index: usize, _block_size: usize) -> usize {
+    #[inline]
+    fn get_block_id(&self, _group_index: usize) -> usize {
         0
     }
 
-    fn get_block_offset(group_index: usize, _block_size: usize) -> usize {
+    #[inline]
+    fn get_block_offset(&self, group_index: usize) -> usize {
         group_index
     }
 }
