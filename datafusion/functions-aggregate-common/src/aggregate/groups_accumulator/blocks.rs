@@ -63,7 +63,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
     #[inline]
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
-            inner: Vec::new(),
+            inner: Vec::with_capacity(1024),
             total_num_groups: 0,
             block_size,
             emit_state: EmitBlocksState::Init,
@@ -385,12 +385,7 @@ impl<Ty: Clone + Debug> Block for Vec<Ty> {
             default_val,
         }) = build_ctx
         {
-            unsafe {
-                let mut allocated = Vec::with_capacity(block_size);
-                allocated.set_len(block_size);
-                allocated
-            }
-            // vec![default_val; block_size]
+            vec![default_val; block_size]
         } else {
             Vec::new()
         }
