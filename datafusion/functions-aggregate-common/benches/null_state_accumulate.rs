@@ -64,24 +64,24 @@ fn generate_filter(len: usize) -> Option<BooleanArray> {
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    let block_size = 8192;
-    let len = block_size * 4096;
+    let batch_size = 8192;
+    let len = batch_size * 4096;
     let group_indices = generate_group_indices(len);
     let rows_count = group_indices.len();
     let values = generate_values(len, false);
     let opt_filter = generate_filter(len);
     let prim_op = |x: &mut i64, y: i64| *x = x.add_wrapping(y);
 
-    let mut num_chunks = len.div_ceil(block_size);
-    let last_chunk_size = len % block_size;
+    let mut num_chunks = len.div_ceil(batch_size);
+    let last_chunk_size = len % batch_size;
     let last_chunk_size = if last_chunk_size > 0 {
         last_chunk_size
     } else {
-        block_size
+        batch_size
     };
 
     let group_indices_chunks = group_indices
-        .chunks(block_size)
+        .chunks(batch_size)
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
 
@@ -90,9 +90,9 @@ fn criterion_benchmark(c: &mut Criterion) {
         let chunk_size = if chunk_idx == num_chunks - 1 {
             last_chunk_size
         } else {
-            block_size
+            batch_size
         };
-        let chunk = values.slice(chunk_idx * block_size, chunk_size);
+        let chunk = values.slice(chunk_idx * batch_size, chunk_size);
 
         values_chunks.push(chunk);
     }
@@ -108,6 +108,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     if &mode == "blocked" || &mode == "all" {
         c.bench_function("Blocked accumulate", |b| {
             b.iter(|| {
+                let block_size = 4 * batch_size;
                 let mut blocks = GeneralBlocks::<i64>::new(Some(block_size));
                 let group_index_operation = BlockedGroupIndexOperations::new(block_size);
 
