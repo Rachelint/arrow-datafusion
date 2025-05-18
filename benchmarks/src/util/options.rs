@@ -61,9 +61,6 @@ pub struct CommonOpt {
     /// Activate debug mode to see more details
     #[structopt(short, long)]
     pub debug: bool,
-
-    #[structopt(short, long)]
-    pub blocked: bool,
 }
 
 impl CommonOpt {
@@ -86,12 +83,7 @@ impl CommonOpt {
             config =
                 config.with_sort_spill_reservation_bytes(sort_spill_reservation_bytes);
         }
-
-        config
-            .options_mut()
-            .execution
-            .enable_aggregation_blocked_groups = self.blocked;
-
+        
         config
     }
 
