@@ -87,7 +87,10 @@ impl CommonOpt {
                 config.with_sort_spill_reservation_bytes(sort_spill_reservation_bytes);
         }
 
-        config.options().execution.enable_aggregation_blocked_groups = self.blocked;
+        config
+            .options_mut()
+            .execution
+            .enable_aggregation_blocked_groups = self.blocked;
 
         config
     }
