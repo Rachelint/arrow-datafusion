@@ -44,6 +44,9 @@ pub struct Blocks<B: Block, E: EmitBlockBuilder<B = B>> {
     /// Data in blocks
     inner: Vec<B>,
 
+    /// Optimization for high cardinality case
+    current: B,
+
     /// Block size
     ///
     /// It states:
@@ -64,6 +67,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
     pub fn new(block_size: Option<usize>) -> Self {
         Self {
             inner: Vec::with_capacity(1024),
+            current: B::default(),
             total_num_groups: 0,
             block_size,
             emit_state: EmitBlocksState::Init,
@@ -78,13 +82,22 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
             return;
         }
 
-        let mut a = Vec::<i32>::new();
         // We compute how many blocks we need to store the `total_num_groups` groups.
         // And if found the `exist_blocks` are not enough, we allocate more.
         let needed_blocks =
             total_num_groups.div_ceil(self.block_size.unwrap_or(usize::MAX));
-        let exist_blocks = self.inner.len();
+        let exist_blocks = self
+            .total_num_groups
+            .div_ceil(self.block_size.unwrap_or(usize::MAX));
         if exist_blocks < needed_blocks {
+            // Take current and push into `inner`, because it is already not the last
+            let old_last = mem::take(&mut self.current);
+
+            if !old_last.is_empty() {
+                self.inner.push(old_last);
+            }
+
+            // allocate blocks
             let allocated_blocks = needed_blocks - exist_blocks;
             self.inner.extend(
                 iter::repeat_with(|| {
@@ -95,6 +108,10 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
                 })
                 .take(allocated_blocks),
             );
+
+            // pop the last, and set the current
+            let new_last = self.inner.pop().unwrap();
+            self.current = new_last;
         }
 
         // If in `blocked approach`, we can return now.
@@ -102,8 +119,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
         // `single block` not large enough, we allocate a larger one and copy
         // the exist data to it(such copy is really expansive).
         if self.block_size.is_none() {
-            let single_block = self.inner.last_mut().unwrap();
-            single_block.expand(total_num_groups, default_val.clone());
+            self.current.expand(total_num_groups, default_val.clone());
         }
 
         self.total_num_groups = total_num_groups;
@@ -112,8 +128,13 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
     /// Push block
     pub fn push_block(&mut self, block: B) {
         assert!(!self.is_emitting(), "can not update groups during emitting");
+
+        let old_last = mem::take(&mut self.current);
+        if !old_last.is_empty() {
+            self.inner.push(old_last);
+        }
         let block_len = block.len();
-        self.inner.push(block);
+        self.current = block;
         self.total_num_groups += block_len;
     }
 
@@ -130,6 +151,12 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
             // emitting starts. because it is used to represent number of `exist groups`,
             // and I think `emitting groups` actually not exist anymore.
             // But we still can't do it now for keep the same semantic with `GroupValues`.
+
+            let old_last = mem::take(&mut self.current);
+            if !old_last.is_empty() {
+                self.inner.push(old_last);
+            }
+
             (self.total_num_groups, self.block_size.unwrap_or(usize::MAX))
         } else {
             (0, 0)
@@ -157,6 +184,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
         self.total_num_groups
     }
 
+    // FIXME
     #[inline]
     pub fn iter(&self) -> impl Iterator<Item = &B> {
         self.inner.iter()
@@ -165,6 +193,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
     #[inline]
     pub fn clear(&mut self) {
         self.inner.clear();
+        self.current = B::default();
         self.total_num_groups = 0;
     }
 
@@ -443,6 +472,12 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
 
     #[inline(always)]
     pub fn get_mut(&mut self, block_id: usize, block_offset: usize) -> &mut T {
+        if block_id == self.inner.len() {
+            unsafe {
+                return self.current.get_unchecked_mut(block_offset);
+            }
+        }
+
         unsafe {
             self.inner
                 .get_unchecked_mut(block_id)
@@ -452,6 +487,12 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
 
     #[inline(always)]
     pub fn get(&self, block_id: usize, block_offset: usize) -> &T {
+        if block_id == self.inner.len() {
+            unsafe {
+                return self.current.get_unchecked(block_offset);
+            }
+        }
+
         &self.inner[block_id][block_offset]
     }
 }
