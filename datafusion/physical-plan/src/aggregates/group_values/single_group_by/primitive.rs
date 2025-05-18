@@ -177,10 +177,20 @@ where
             };
 
             let group_index_operation = BlockedGroupIndexOperations::new(block_size);
-            self.get_or_create_groups(cols, groups, before_add_group, group_index_operation)
+            self.get_or_create_groups(
+                cols,
+                groups,
+                before_add_group,
+                group_index_operation,
+            )
         } else {
             let group_index_operation = FlatGroupIndexOperations;
-            self.get_or_create_groups(cols, groups, |_: &mut Vec<Vec<T::Native>>| {}, group_index_operation)
+            self.get_or_create_groups(
+                cols,
+                groups,
+                |_: &mut Vec<Vec<T::Native>>| {},
+                group_index_operation,
+            )
         }
     }
 
@@ -443,10 +453,14 @@ where
                     let insert = self.map.entry(
                         hash,
                         |g| unsafe {
-                            let block_id = group_index_operation.get_block_id(g.0);
-                            let block_offset =
-                                group_index_operation.get_block_offset(g.0);
-                            self.values[block_id].get_unchecked(block_offset).is_eq(key)
+                            g.1 == hash && {
+                                let block_id = group_index_operation.get_block_id(g.0);
+                                let block_offset =
+                                    group_index_operation.get_block_offset(g.0);
+                                self.values[block_id]
+                                    .get_unchecked(block_offset)
+                                    .is_eq(key)
+                            }
                         },
                         |g| g.1,
                     );

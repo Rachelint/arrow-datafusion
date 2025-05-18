@@ -442,20 +442,12 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
 
     #[inline(always)]
     pub fn get_mut(&mut self, block_id: usize, block_offset: usize) -> &mut T {
-        unsafe {
-            self.inner
-                .get_unchecked_mut(block_id)
-                .get_unchecked_mut(block_offset)
-        }
+        &mut self.inner[block_id][block_offset]
     }
 
     #[inline(always)]
     pub fn get(&self, block_id: usize, block_offset: usize) -> &T {
-        unsafe {
-            self.inner
-                .get_unchecked(block_id)
-                .get_unchecked(block_offset)
-        }
+        &self.inner[block_id][block_offset]
     }
 }
 
