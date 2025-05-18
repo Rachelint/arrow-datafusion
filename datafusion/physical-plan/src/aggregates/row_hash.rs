@@ -723,7 +723,7 @@ fn maybe_enable_blocked_groups(
 
     match (group_values_supports_blocked, accumulators_support_blocked) {
         (true, true) => {
-            let block_size = block_size.next_power_of_two();
+            let block_size = (block_size * 8).next_power_of_two();
             group_values.alter_block_size(Some(block_size))?;
             accumulators
                 .iter_mut()
