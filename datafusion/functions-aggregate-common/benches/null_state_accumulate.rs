@@ -104,11 +104,15 @@ fn criterion_benchmark(c: &mut Criterion) {
     }
 
     let mode = std::env::var("ACC_MODE").unwrap_or("all".to_string());
+    let block_factor = std::env::var("BLOCK_FACTOR")
+        .unwrap_or("1".to_string())
+        .parse::<usize>()
+        .unwrap();
 
     if &mode == "blocked" || &mode == "all" {
         c.bench_function("Blocked accumulate", |b| {
             b.iter(|| {
-                let block_size = 8 * batch_size;
+                let block_size = block_factor * batch_size;
                 let mut blocks = GeneralBlocks::<i64>::new(Some(block_size));
                 let group_index_operation = BlockedGroupIndexOperations::new(block_size);
 
