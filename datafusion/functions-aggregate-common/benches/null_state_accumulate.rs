@@ -122,10 +122,10 @@ fn criterion_benchmark(c: &mut Criterion) {
                     let values = values.as_primitive::<Int64Type>();
                     blocks.expand(total_num_groups, 0);
 
-                    let mut value_fn = |block_id, block_offset, new_value| {
-                        let value = blocks.get_mut(block_id, block_offset);
-                        prim_op(value, new_value);
-                    };
+                    // let mut value_fn = |block_id, block_offset, new_value| {
+                    //     let value = blocks.get_mut(block_id, block_offset);
+                    //     prim_op(value, new_value);
+                    // };
 
                     accumulate::accumulate(
                         group_indices,
@@ -136,7 +136,7 @@ fn criterion_benchmark(c: &mut Criterion) {
                                 group_index_operation.get_block_id(group_index);
                             let block_offset =
                                 group_index_operation.get_block_offset(group_index);
-                            value_fn(block_id, block_offset, value);
+                            sum(&mut blocks, block_id, block_offset, value);
                         },
                     );
                 }
