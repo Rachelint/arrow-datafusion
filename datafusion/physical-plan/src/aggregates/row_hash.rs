@@ -66,7 +66,7 @@ pub(crate) enum ExecutionState {
     ///
     /// It is the blocked version `ProducingOutput` and will be used
     /// when blocked optimization is enabled.
-    ProducingBlocks,
+    ProducingBlocks(Option<RecordBatch>),
     /// Produce intermediate aggregate state for each input row without
     /// aggregation.
     ///
@@ -897,7 +897,7 @@ impl Stream for GroupedHashAggregateStream {
                     )));
                 }
 
-                ExecutionState::ProducingBlocks => {
+                ExecutionState::ProducingBlocks(None) => {
                     // Try to emit and then:
                     //   - If found `Err`, throw it, end this stream abnormally
                     //   - If found `None`, it means all blocks are polled, end this stream normally
@@ -907,20 +907,39 @@ impl Stream for GroupedHashAggregateStream {
                         return Poll::Ready(Some(Err(emit_result.unwrap_err())));
                     };
 
-                    let Some(batch) = batch_opt else {
-                        self.exec_state = if self.input_done {
+                    // If Emit
+                    self.exec_state = if let Some(batch) = batch_opt {
+                        ExecutionState::ProducingBlocks(Some(batch))
+                    } else {
+                        if self.input_done {
                             ExecutionState::Done
                         } else if self.should_skip_aggregation() {
                             ExecutionState::SkippingAggregation
                         } else {
                             ExecutionState::ReadingInput
-                        };
-                        continue;
+                        }
                     };
+                }
 
-                    debug_assert!(batch.num_rows() > 0);
+                ExecutionState::ProducingBlocks(Some(batch)) => {
+                    // slice off a part of the batch, if needed
+                    let output_batch;
+                    let size = self.batch_size;
+                    (self.exec_state, output_batch) = if batch.num_rows() <= size {
+                        (ExecutionState::ProducingBlocks(None), batch.clone())
+                    } else {
+                        // output first batch_size rows
+                        let size = self.batch_size;
+                        let num_remaining = batch.num_rows() - size;
+                        let remaining = batch.slice(size, num_remaining);
+                        let output = batch.slice(0, size);
+                        (ExecutionState::ProducingBlocks(Some(remaining)), output)
+                    };
+                    // Empty record batches should not be emitted.
+                    // They need to be treated as  [`Option<RecordBatch>`]es and handled separately
+                    debug_assert!(output_batch.num_rows() > 0);
                     return Poll::Ready(Some(Ok(
-                        batch.record_output(&self.baseline_metrics)
+                        output_batch.record_output(&self.baseline_metrics)
                     )));
                 }
 
@@ -1234,7 +1253,7 @@ impl GroupedHashAggregateStream {
                 let batch = self.emit(EmitTo::All, false)?;
                 batch.map_or(ExecutionState::Done, ExecutionState::ProducingOutput)
             } else {
-                ExecutionState::ProducingBlocks
+                ExecutionState::ProducingBlocks(None)
             }
         } else {
             // TODO: support spilling when blocked group optimization is on
@@ -1272,7 +1291,7 @@ impl GroupedHashAggregateStream {
                         self.exec_state = ExecutionState::ProducingOutput(batch);
                     };
                 } else {
-                    self.exec_state = ExecutionState::ProducingBlocks;
+                    self.exec_state = ExecutionState::ProducingBlocks(None);
                 }
             }
         }
