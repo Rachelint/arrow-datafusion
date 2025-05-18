@@ -78,6 +78,7 @@ impl<B: Block, E: EmitBlockBuilder<B = B>> Blocks<B, E> {
             return;
         }
 
+        let mut a = Vec::<i32>::new();
         // We compute how many blocks we need to store the `total_num_groups` groups.
         // And if found the `exist_blocks` are not enough, we allocate more.
         let needed_blocks =
@@ -384,7 +385,12 @@ impl<Ty: Clone + Debug> Block for Vec<Ty> {
             default_val,
         }) = build_ctx
         {
-            vec![default_val; block_size]
+            unsafe {
+                let mut allocated = Vec::with_capacity(block_size);
+                allocated.set_len(block_size);
+                allocated
+            }
+            // vec![default_val; block_size]
         } else {
             Vec::new()
         }
