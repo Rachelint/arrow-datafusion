@@ -457,7 +457,8 @@ where
                                 let block_id = group_index_operation.get_block_id(g.0);
                                 let block_offset =
                                     group_index_operation.get_block_offset(g.0);
-                                self.values[block_id]
+                                self.values
+                                    .get_unchecked(block_id)
                                     .get_unchecked(block_offset)
                                     .is_eq(key)
                             }

@@ -974,7 +974,7 @@ mod test {
             values,
             values_with_nulls,
             filter,
-            block_size: 3,
+            block_size: 4,
             acc_rounds: 5,
         }
         .run()
@@ -1026,7 +1026,7 @@ mod test {
             let values: Vec<u32> = (0..num_values).map(|_| rng.gen()).collect();
 
             // random block size
-            let block_size = rng.gen_range(1..num_groups);
+            let block_size = rng.gen_range(1..num_groups).next_power_of_two();
 
             // random acc rounds
             let acc_rounds = rng.gen_range(1..=group_indices.len());
