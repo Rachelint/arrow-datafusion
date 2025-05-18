@@ -442,7 +442,11 @@ impl<T: Clone + Debug> GeneralBlocks<T> {
 
     #[inline(always)]
     pub fn get_mut(&mut self, block_id: usize, block_offset: usize) -> &mut T {
-        &mut self.inner[block_id][block_offset]
+        unsafe {
+            self.inner
+                .get_unchecked_mut(block_id)
+                .get_unchecked_mut(block_offset)
+        }
     }
 
     #[inline(always)]
