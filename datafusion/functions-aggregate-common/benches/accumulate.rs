@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, BooleanArray, Int64Array};
 use criterion::{criterion_group, criterion_main, Criterion};
+use datafusion_functions_aggregate_common::aggregate::groups_accumulator::accumulate::accumulate_indices;
 
 fn generate_group_indices(len: usize) -> Vec<usize> {
     (0..len).collect()
