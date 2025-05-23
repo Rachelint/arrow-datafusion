@@ -33,6 +33,8 @@ use datafusion_functions_aggregate_common::aggregate::groups_accumulator::group_
 };
 use half::f16;
 use hashbrown::hash_table::HashTable;
+use std::io::Read;
+use std::{cmp, iter, usize};
 use std::mem::{self, size_of};
 use std::sync::Arc;
 
@@ -93,7 +95,7 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     /// More details can see:
     /// <https://github.com/apache/datafusion/issues/15961>
     ///
-    map: HashTable<(usize, u64)>,
+    map: HashTable<(usize, T::Native)>,
 
     /// The group index of the null value if any
     null_group: Option<usize>,
@@ -131,6 +133,10 @@ pub struct GroupValuesPrimitive<T: ArrowPrimitiveType> {
     /// Mark if it is during blocks emitting, if so states can't
     /// be updated until all blocks are emitted
     emit_state: EmitBlocksState<Vec<Vec<T::Native>>>,
+
+    append_row_indices: Vec<usize>,
+
+    append_row_offsets: Vec<usize>,
 }
 
 impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
@@ -148,6 +154,8 @@ impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T> {
             block_size: None,
             total_num_groups: 0,
             emit_state: EmitBlocksState::Init,
+            append_row_indices: Vec::new(),
+            append_row_offsets: Vec::new(),
         }
     }
 
@@ -162,36 +170,136 @@ where
     T::Native: HashValue,
 {
     fn intern(&mut self, cols: &[ArrayRef], groups: &mut Vec<usize>) -> Result<()> {
+        assert_eq!(cols.len(), 1);
         if self.is_emitting() {
             return internal_err!("can not update groups during blocks emitting");
         }
 
-        if let Some(block_size) = self.block_size {
-            let before_add_group = |group_values: &mut Vec<Vec<T::Native>>| {
-                if group_values.is_empty()
-                    || group_values.last().unwrap().len() == block_size
-                {
-                    let new_block = Vec::with_capacity(block_size);
-                    group_values.push(new_block);
+        // Clear helper structs
+        groups.clear();
+        self.append_row_indices.clear();
+        self.append_row_offsets.clear();
+
+        let mut new_total_num_groups = self.total_num_groups;
+        let block_size = self.block_size.unwrap_or(usize::MAX);
+        let col = cols[0].as_primitive::<T>();
+        for (row_idx, v) in col.iter().enumerate() {
+            let group_index = match v {
+                None => *self.null_group.get_or_insert_with(|| {
+                    self.append_row_indices.push(row_idx);
+
+                    // Compute group index
+                    let group_index = new_total_num_groups;
+                    new_total_num_groups += 1;
+
+                    // Get group index and finish actions needed it
+                    group_index
+                }),
+                Some(key) => {
+                    let state = &self.random_state;
+                    let hash = key.hash(state);
+                    let insert = self.map.entry(
+                        hash,
+                        |&(_, v)| v.is_eq(key),
+                        |&(_, v)| v.hash(state),
+                    );
+
+                    match insert {
+                        hashbrown::hash_table::Entry::Occupied(o) => o.get().0,
+                        hashbrown::hash_table::Entry::Vacant(v) => {
+                            self.append_row_indices.push(row_idx);
+
+                            // Compute group index
+                            let group_index = new_total_num_groups;
+                            new_total_num_groups += 1;
+
+                            v.insert((group_index, key));
+                            group_index
+                        }
+                    }
                 }
             };
 
-            let group_index_operation = BlockedGroupIndexOperations::new(block_size);
-            self.get_or_create_groups(
-                cols,
-                groups,
-                before_add_group,
-                group_index_operation,
-            )
-        } else {
-            let group_index_operation = FlatGroupIndexOperations;
-            self.get_or_create_groups(
-                cols,
-                groups,
-                |_: &mut Vec<Vec<T::Native>>| {},
-                group_index_operation,
-            )
+            groups.push(group_index)
         }
+
+        // Start to append group values
+        if self.append_row_indices.is_empty() {
+            return Ok(());
+        }
+
+        // FIXME, new tests to cover
+        // Partitions the `append_row_indices` according to blocks like:
+        //
+        // ```
+        //   [0, remaining),
+        //   [remaining, remaining + block_size),
+        //   ...
+        //   [remaining + N * block_size, append_len)
+        // ```
+        //
+        self.append_row_offsets.push(0);
+        let total_append_len = self.append_row_indices.len();
+        let mut cur_append_len = if let Some(blk) = self.values.last() {
+            // Maybe still some slots exist in last block, and we need to fill it first
+            let mut cur_append_len = block_size - blk.len();
+            cur_append_len = cmp::min(cur_append_len, total_append_len);
+            cur_append_len
+        } else {
+            0
+        };
+
+        // If still some slots exist, we insert it firstly
+        if cur_append_len > 0 {
+            self.append_row_offsets.push(cur_append_len);
+        }
+
+        while cur_append_len < total_append_len {
+            let mut next_append_len = total_append_len - cur_append_len;
+            next_append_len = cmp::min(next_append_len, block_size);
+            cur_append_len += next_append_len;
+            self.append_row_offsets.push(cur_append_len);
+        }
+
+        // Expand to ensure blocks are enough to hold the total groups
+        let needed_blocks = new_total_num_groups.div_ceil(block_size);
+        let exist_blocks = self.values.len();
+        let allocated_blocks = needed_blocks - exist_blocks;
+        if allocated_blocks > 0 {
+            self.values.extend(
+                iter::repeat(Vec::with_capacity(block_size)).take(allocated_blocks),
+            );
+        }
+
+        // Fill blocks
+        let mut cur_block_idx = self.total_num_groups / block_size;
+        let col_values = col.values();
+        if self.append_row_indices.len() == col.len() {
+            for bounds in self.append_row_offsets.windows(2) {
+                let lower = bounds[0] as usize;
+                let upper = bounds[1] as usize;
+                let block = self.values.get_mut(cur_block_idx).unwrap();
+                block.extend_from_slice(&col_values[lower..upper]);
+
+                cur_block_idx += 1;
+            }
+        } else {
+            for bounds in self.append_row_offsets.windows(2) {
+                let lower = bounds[0] as usize;
+                let upper = bounds[1] as usize;
+                let block = self.values.get_mut(cur_block_idx).unwrap();
+                for &row_idx in self.append_row_indices[lower..upper].iter() {
+                    block.push(col_values[row_idx as usize]);
+                }
+
+                cur_block_idx += 1;
+            }
+        }
+
+        // Finally, update the `total_num_groups`
+        self.total_num_groups = new_total_num_groups;
+
+        Ok(())
     }
 
     fn size(&self) -> usize {
@@ -406,89 +514,6 @@ where
         }
         self.block_size = block_size;
 
-        Ok(())
-    }
-}
-
-impl<T: ArrowPrimitiveType> GroupValuesPrimitive<T>
-where
-    T::Native: HashValue,
-{
-    fn get_or_create_groups<F, O>(
-        &mut self,
-        cols: &[ArrayRef],
-        groups: &mut Vec<usize>,
-        mut before_add_group: F,
-        group_index_operation: O,
-    ) -> Result<()>
-    where
-        F: FnMut(&mut Vec<Vec<T::Native>>),
-        O: GroupIndexOperations,
-    {
-        assert_eq!(cols.len(), 1);
-        groups.clear();
-
-        let block_size = self.block_size.unwrap_or_default();
-        for v in cols[0].as_primitive::<T>() {
-            let group_index = match v {
-                None => *self.null_group.get_or_insert_with(|| {
-                    // Actions before add new group like checking if room is enough
-                    before_add_group(&mut self.values);
-
-                    // Get block infos and update block,
-                    // we need `current block` and `next offset in block`
-                    let current_block = self.values.last_mut().unwrap();
-                    current_block.push(Default::default());
-
-                    // Compute group index
-                    let group_index = self.total_num_groups;
-                    self.total_num_groups += 1;
-
-                    // Get group index and finish actions needed it
-                    group_index
-                }),
-                Some(key) => {
-                    let state = &self.random_state;
-                    let hash = key.hash(state);
-                    let insert = self.map.entry(
-                        hash,
-                        |g| unsafe {
-                            g.1 == hash && {
-                                let block_id = group_index_operation.get_block_id(g.0);
-                                let block_offset =
-                                    group_index_operation.get_block_offset(g.0);
-                                self.values[block_id]
-                                    .get_unchecked(block_offset)
-                                    .is_eq(key)
-                            }
-                        },
-                        |g| g.1,
-                    );
-
-                    match insert {
-                        hashbrown::hash_table::Entry::Occupied(o) => o.get().0,
-                        hashbrown::hash_table::Entry::Vacant(v) => {
-                            // Actions before add new group like checking if room is enough
-                            before_add_group(&mut self.values);
-
-                            // Get block infos and update block,
-                            // we need `current block` and `next offset in block`
-                            let current_block = self.values.last_mut().unwrap();
-                            current_block.push(key);
-
-                            // Compute group index
-                            let group_index = self.total_num_groups;
-                            self.total_num_groups += 1;
-
-                            v.insert((group_index, hash));
-                            group_index
-                        }
-                    }
-                }
-            };
-
-            groups.push(group_index)
-        }
         Ok(())
     }
 }
