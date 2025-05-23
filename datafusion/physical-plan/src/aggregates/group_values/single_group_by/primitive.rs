@@ -267,7 +267,8 @@ where
         let allocated_blocks = needed_blocks - exist_blocks;
         if allocated_blocks > 0 {
             self.values.extend(
-                iter::repeat(Vec::with_capacity(block_size)).take(allocated_blocks),
+                iter::repeat_with(|| Vec::with_capacity(block_size))
+                    .take(allocated_blocks),
             );
         }
 
