@@ -130,19 +130,10 @@ where
                 }),
                 Some(key) => {
                     let state = &self.random_state;
-
-                    if (self.map.len() + 1) * 2 > self.map.capacity() {
-                        // need to request more memory
-                        let bump_elements = self.map.capacity().max(16);
-                        self.map.reserve(bump_elements, |&(_, v)| v.hash(state));
-                    }
-
                     let hash = key.hash(state);
-                    let insert = self.map.entry(
-                        hash,
-                        |&(_, v)| v.is_eq(key),
-                        |&(_, v)| v.hash(state),
-                    );
+                    let insert =
+                        self.map
+                            .entry(hash, |&(_, _)| false, |&(_, v)| v.hash(state));
 
                     match insert {
                         hashbrown::hash_table::Entry::Occupied(o) => o.get().0,
