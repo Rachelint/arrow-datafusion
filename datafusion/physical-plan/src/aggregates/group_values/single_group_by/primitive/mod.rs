@@ -131,19 +131,31 @@ where
                 Some(key) => {
                     let state = &self.random_state;
                     let hash = key.hash(state);
-                    let insert = self.map.entry(
-                        hash,
-                        |&(_, v)| v.is_eq(key),
-                        |&(_, v)| v.hash(state),
-                    );
+                    let find_res = self.map.find_entry(hash, |&(_, v)| v.is_eq(key));
+                    match find_res {
+                        Ok(occupied) => occupied.get().0,
+                        Err(_absent) => {
+                            if self.len() == self.map.capacity() {
+                                // need to request more memory
+                                let bump_elements = self.map.capacity().max(16);
+                                self.map.reserve(bump_elements, |&(_, v)| v.hash(state));
+                            }
 
-                    match insert {
-                        hashbrown::hash_table::Entry::Occupied(o) => o.get().0,
-                        hashbrown::hash_table::Entry::Vacant(v) => {
-                            let g = self.values.len();
-                            v.insert((g, key));
-                            self.values.push(key);
-                            g
+                            // still need to insert the element since first try failed
+                            if let hashbrown::hash_table::Entry::Vacant(v) =
+                                self.map.entry(
+                                    hash,
+                                    |&(_, v)| v.is_eq(key),
+                                    |&(_, v)| v.hash(state),
+                                )
+                            {
+                                let g = self.values.len();
+                                v.insert((g, key));
+                                self.values.push(key);
+                                g
+                            } else {
+                                unreachable!();
+                            }
                         }
                     }
                 }
