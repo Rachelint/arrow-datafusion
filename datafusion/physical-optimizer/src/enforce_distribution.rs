@@ -28,8 +28,8 @@ use std::sync::Arc;
 use crate::optimizer::PhysicalOptimizerRule;
 use crate::output_requirements::OutputRequirementExec;
 use crate::utils::{
-    add_sort_above_with_check, is_coalesce_partitions, is_repartition,
-    is_sort_preserving_merge,
+    add_sort_above_with_check, is_coalesce_partition_groups,
+    is_coalesce_partitions, is_repartition, is_sort_preserving_merge,
 };
 
 use arrow::compute::SortOptions;
@@ -47,6 +47,7 @@ use datafusion_physical_plan::ExecutionPlanProperties;
 use datafusion_physical_plan::aggregates::{
     AggregateExec, AggregateMode, PhysicalGroupBy,
 };
+use datafusion_physical_plan::coalesce_partition_groups::CoalescePartitionGroupsExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::execution_plan::EmissionType;
 use datafusion_physical_plan::joins::{
@@ -180,6 +181,8 @@ use itertools::izip;
 ///
 /// This rule only chooses the exact match and satisfies the Distribution(a, b, c)
 /// by a HashPartition(a, b, c).
+const FINAL_AGG_HASH_COALESCE_FANOUT: usize = 8;
+
 #[derive(Default, Debug)]
 pub struct EnforceDistribution {}
 
@@ -409,6 +412,7 @@ pub fn adjust_input_keys_ordering(
         }
     } else if plan.is::<RepartitionExec>()
         || plan.is::<CoalescePartitionsExec>()
+        || plan.is::<CoalescePartitionGroupsExec>()
         || plan.is::<WindowAggExec>()
     {
         requirements.data.clear();
@@ -918,6 +922,100 @@ fn add_hash_on_top(
     Ok(input)
 }
 
+fn target_partitions_for_hash_coalesce(plan: &Arc<dyn ExecutionPlan>) -> Option<usize> {
+    let aggregate = plan.downcast_ref::<AggregateExec>()?;
+    matches!(
+        aggregate.mode(),
+        AggregateMode::FinalPartitioned | AggregateMode::SinglePartitioned
+    )
+    .then_some(FINAL_AGG_HASH_COALESCE_FANOUT)
+}
+
+fn add_hash_with_partition_groups_on_top(
+    input: DistributionContext,
+    hash_exprs: Vec<Arc<dyn PhysicalExpr>>,
+    output_partitions: usize,
+    fanout: usize,
+    allow_subset_satisfy_partitioning: bool,
+) -> Result<DistributionContext> {
+    // This helper is a specialized variant of `add_hash_on_top` for partitioned
+    // final aggregates. The intent is:
+    //   1. Repartition into more hash buckets than the parent ultimately wants.
+    //   2. Coalesce those buckets back into `output_partitions` groups.
+    //   3. Preserve the parent's visible contract as `Hash(..., output_partitions)`.
+    //
+    // If the intermediate partition count is `output_partitions * fanout`, then
+    // grouping partitions by `partition_id % output_partitions` is equivalent to
+    // folding `hash % (output_partitions * fanout)` back into `hash % output_partitions`.
+    // That gives the final aggregate more upstream parallelism without breaking the
+    // hash-distribution semantics it requires.
+
+    // Step 1: Ask the same question as normal hash enforcement: does the input
+    // already satisfy the requested hash distribution from the parent's point of view?
+    let dist = Distribution::HashPartitioned(hash_exprs.clone());
+    let current_partitions = input.plan.output_partitioning().partition_count();
+    let satisfaction = input.plan.output_partitioning().satisfaction(
+        &dist,
+        input.plan.equivalence_properties(),
+        allow_subset_satisfy_partitioning,
+    );
+
+    let needs_repartition = if allow_subset_satisfy_partitioning {
+        !satisfaction.is_satisfied()
+    } else {
+        !satisfaction.is_satisfied() || output_partitions > current_partitions
+    };
+
+    // Step 2: If no new hash shuffle is needed, we may still be able to reduce an
+    // already-hash-partitioned input down to the parent's target partition count.
+    // Example: the child is already `Hash(..., 32)` and the parent wants `Hash(..., 4)`.
+    // In that case, if 32 is divisible by 4, `CoalescePartitionGroupsExec` can merge
+    // partitions {0,4,8,...}, {1,5,9,...}, ... and preserve `Hash(..., 4)` semantics.
+    if !needs_repartition {
+        if let Partitioning::Hash(_, partition_count) = input.plan.output_partitioning()
+            && *partition_count > output_partitions
+            && *partition_count % output_partitions == 0
+        {
+            let plan = Arc::new(CoalescePartitionGroupsExec::try_new(
+                Arc::clone(&input.plan),
+                output_partitions,
+            )?) as _;
+            return Ok(DistributionContext::new(plan, true, vec![input]));
+        }
+
+        // Otherwise the existing input is already good enough for the parent.
+        return Ok(input);
+    }
+
+    // Step 3: We do need a new hash shuffle, but instead of shuffling directly to
+    // `output_partitions`, we intentionally oversubscribe the hash buckets by `fanout`.
+    // This creates more upstream parallelism before we coalesce back down.
+    let repartition_partitions = output_partitions.checked_mul(fanout).ok_or_else(|| {
+        datafusion_common::DataFusionError::Internal(
+            "aggregate hash repartition fanout overflow".to_string(),
+        )
+    })?;
+    let repartition = Arc::new(RepartitionExec::try_new(
+        Arc::clone(&input.plan),
+        Partitioning::Hash(hash_exprs, repartition_partitions),
+    )?) as Arc<dyn ExecutionPlan>;
+    let repartition_context = DistributionContext::new(repartition.clone(), true, vec![input]);
+
+    // Step 4: Fold the `output_partitions * fanout` hash buckets back into
+    // `output_partitions` groups. The resulting node is still allowed to advertise
+    // `Hash(..., output_partitions)` to the parent, because the grouping is aligned
+    // with modulo arithmetic on the same hash expression.
+    let coalesced = Arc::new(CoalescePartitionGroupsExec::try_new(
+        repartition,
+        output_partitions,
+    )?) as Arc<dyn ExecutionPlan>;
+    Ok(DistributionContext::new(
+        coalesced,
+        true,
+        vec![repartition_context],
+    ))
+}
+
 /// Adds a [`SortPreservingMergeExec`] or a [`CoalescePartitionsExec`] operator
 /// on top of the given plan node to satisfy a single partition requirement
 /// while preserving ordering constraints.
@@ -1014,6 +1112,7 @@ fn remove_dist_changing_operators(
 ) -> Result<DistributionContext> {
     while is_repartition(&distribution_context.plan)
         || is_coalesce_partitions(&distribution_context.plan)
+        || is_coalesce_partition_groups(&distribution_context.plan)
         || is_sort_preserving_merge(&distribution_context.plan)
     {
         // All of above operators have a single child. First child is only child.
@@ -1362,12 +1461,24 @@ pub fn ensure_distribution(
                     // See https://github.com/apache/datafusion/issues/18341#issuecomment-3503238325 for background
                     // When inserting hash is necessary to satisfy hash requirement, insert hash repartition.
                     if hash_necessary {
-                        child = add_hash_on_top(
-                            child,
-                            exprs.to_vec(),
-                            target_partitions,
-                            allow_subset_satisfy_partitioning,
-                        )?;
+                        child = if let Some(fanout) = target_partitions_for_hash_coalesce(&plan)
+                            && target_partitions > 1
+                        {
+                            add_hash_with_partition_groups_on_top(
+                                child,
+                                exprs.to_vec(),
+                                target_partitions,
+                                fanout,
+                                allow_subset_satisfy_partitioning,
+                            )?
+                        } else {
+                            add_hash_on_top(
+                                child,
+                                exprs.to_vec(),
+                                target_partitions,
+                                allow_subset_satisfy_partitioning,
+                            )?
+                        };
                     }
                 }
                 Distribution::UnspecifiedDistribution => {
@@ -1507,6 +1618,7 @@ fn update_children(mut dist_context: DistributionContext) -> Result<Distribution
         } else {
             child_context.plan.is::<SortPreservingMergeExec>()
                 || child_context.plan.is::<CoalescePartitionsExec>()
+                || child_context.plan.is::<CoalescePartitionGroupsExec>()
                 || child_context.plan.children().is_empty()
                 || child_context.children[0].data
                 || child_context

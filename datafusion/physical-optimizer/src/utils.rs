@@ -19,6 +19,7 @@ use std::sync::Arc;
 
 use datafusion_common::Result;
 use datafusion_physical_expr::{LexOrdering, LexRequirement};
+use datafusion_physical_plan::coalesce_partition_groups::CoalescePartitionGroupsExec;
 use datafusion_physical_plan::coalesce_partitions::CoalescePartitionsExec;
 use datafusion_physical_plan::limit::{GlobalLimitExec, LocalLimitExec};
 use datafusion_physical_plan::repartition::RepartitionExec;
@@ -101,6 +102,11 @@ pub fn is_sort_preserving_merge(plan: &Arc<dyn ExecutionPlan>) -> bool {
 /// Checks whether the given operator is a [`CoalescePartitionsExec`].
 pub fn is_coalesce_partitions(plan: &Arc<dyn ExecutionPlan>) -> bool {
     plan.is::<CoalescePartitionsExec>()
+}
+
+/// Checks whether the given operator is a [`CoalescePartitionGroupsExec`].
+pub fn is_coalesce_partition_groups(plan: &Arc<dyn ExecutionPlan>) -> bool {
+    plan.is::<CoalescePartitionGroupsExec>()
 }
 
 /// Checks whether the given operator is a [`RepartitionExec`].
