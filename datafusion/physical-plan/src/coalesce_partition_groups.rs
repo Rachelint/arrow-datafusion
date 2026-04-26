@@ -21,16 +21,22 @@
 use std::sync::Arc;
 
 use super::metrics::{BaselineMetrics, ExecutionPlanMetricsSet, MetricsSet};
-use super::stream::{ObservedStream, RecordBatchReceiverStream};
+use super::stream::{
+    ObservedStream, RecordBatchReceiverStream, RecordBatchReceiverStreamBuilder,
+    RecordBatchStreamAdapter,
+};
 use super::{
     DisplayAs, ExecutionPlanProperties, PlanProperties, SendableRecordBatchStream,
     Statistics,
 };
 use crate::execution_plan::{CardinalityEffect, EvaluationType, SchedulingType};
 use crate::{DisplayFormatType, ExecutionPlan, Partitioning, check_if_same_properties};
+use arrow::record_batch::RecordBatch;
+use arrow_schema::Schema;
 use datafusion_common::{Result, assert_or_internal_err, internal_err};
 use datafusion_execution::TaskContext;
 use datafusion_physical_expr::PhysicalExpr;
+use futures::StreamExt;
 
 /// Coalesces groups of input partitions into fewer output partitions.
 ///
@@ -46,6 +52,62 @@ pub struct CoalescePartitionGroupsExec {
     metrics: ExecutionPlanMetricsSet,
     /// Cached plan properties
     cache: Arc<PlanProperties>,
+}
+
+/// Schema metadata key used to identify which upstream input partition
+/// produced a batch.
+pub const INPUT_STREAM_ID_METADATA_KEY: &str =
+    "datafusion.coalesce_partition_groups.input_stream_id";
+
+fn tag_batch_with_input_partition_id(
+    batch: RecordBatch,
+    input_partition_id: usize,
+) -> Result<RecordBatch> {
+    let mut metadata = batch.schema().metadata().clone();
+    metadata.insert(
+        INPUT_STREAM_ID_METADATA_KEY.to_string(),
+        input_partition_id.to_string(),
+    );
+    let schema = Arc::new(Schema::new_with_metadata(
+        batch.schema().fields().clone(),
+        metadata,
+    ));
+    Ok(batch.with_schema(schema)?)
+}
+
+fn run_input_with_partition_id(
+    builder: &mut RecordBatchReceiverStreamBuilder,
+    input: Arc<dyn ExecutionPlan>,
+    partition: usize,
+    context: Arc<TaskContext>,
+) {
+    let output = builder.tx();
+
+    builder.spawn(async move {
+        let mut stream = match input.execute(partition, context) {
+            Err(e) => {
+                output.send(Err(e)).await.ok();
+                return Ok(());
+            }
+            Ok(stream) => stream,
+        };
+
+        while let Some(item) = stream.next().await {
+            let item =
+                item.and_then(|batch| tag_batch_with_input_partition_id(batch, partition));
+            let is_err = item.is_err();
+
+            if output.send(item).await.is_err() {
+                return Ok(());
+            }
+
+            if is_err {
+                return Ok(());
+            }
+        }
+
+        Ok(())
+    });
 }
 
 impl CoalescePartitionGroupsExec {
@@ -214,7 +276,17 @@ impl ExecutionPlan for CoalescePartitionGroupsExec {
             0 => internal_err!(
                 "CoalescePartitionGroupsExec requires at least one input partition per output partition"
             ),
-            1 => self.input.execute(partition, context),
+            1 => {
+                let stream = self.input.execute(partition, context)?;
+                let schema = self.schema();
+                let tagged_stream = stream.map(move |item| {
+                    item.and_then(|batch| tag_batch_with_input_partition_id(batch, partition))
+                });
+                Ok(Box::pin(RecordBatchStreamAdapter::new(
+                    schema,
+                    tagged_stream,
+                )))
+            }
             _ => {
                 let baseline_metrics = BaselineMetrics::new(&self.metrics, partition);
                 let elapsed_compute = baseline_metrics.elapsed_compute().clone();
@@ -223,9 +295,11 @@ impl ExecutionPlan for CoalescePartitionGroupsExec {
                 let mut builder =
                     RecordBatchReceiverStream::builder(self.schema(), group_size);
 
-                for input_partition in (partition..input_partitions).step_by(self.output_partitions)
+                for input_partition in
+                    (partition..input_partitions).step_by(self.output_partitions)
                 {
-                    builder.run_input(
+                    run_input_with_partition_id(
+                        &mut builder,
                         Arc::clone(&self.input),
                         input_partition,
                         Arc::clone(&context),
@@ -288,6 +362,7 @@ mod tests {
     use crate::repartition::RepartitionExec;
     use crate::test;
     use datafusion_common::Result;
+    use std::collections::HashSet;
 
     #[tokio::test]
     async fn merge_partition_groups() -> Result<()> {
@@ -326,6 +401,33 @@ mod tests {
             }
             other => panic!("expected hash partitioning, got {other:?}"),
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn annotates_output_batches_with_input_partition_ids() -> Result<()> {
+        let task_ctx = Arc::new(TaskContext::default());
+        let input = test::scan_partitioned(8);
+        let coalesce = CoalescePartitionGroupsExec::try_new(input, 2)?;
+
+        let batches = common::collect(coalesce.execute(0, Arc::clone(&task_ctx))?).await?;
+        let partition_ids = batches
+            .iter()
+            .map(|batch| {
+                batch
+                    .schema()
+                    .metadata()
+                    .get(INPUT_STREAM_ID_METADATA_KEY)
+                    .cloned()
+                    .expect("batch should have input partition id metadata")
+            })
+            .collect::<HashSet<_>>();
+
+        assert_eq!(
+            partition_ids,
+            HashSet::from_iter([0_usize, 2, 4, 6].into_iter().map(|id| id.to_string()))
+        );
 
         Ok(())
     }
