@@ -99,6 +99,9 @@ impl RecordBatchStream for BucketStream {
 
 struct RadixPartitionState {
     runs: BTreeMap<usize, Vec<RecordBatch>>,
+    run_sizes: BTreeMap<usize, usize>,
+    total_runs_size: usize,
+    replaying_run_size: usize,
     is_draining: bool,
 }
 
@@ -106,16 +109,51 @@ impl RadixPartitionState {
     fn new() -> Self {
         Self {
             runs: BTreeMap::new(),
+            run_sizes: BTreeMap::new(),
+            total_runs_size: 0,
+            replaying_run_size: 0,
             is_draining: false,
         }
     }
 
-    fn runs_size(&self) -> usize {
-        self.runs
-            .values()
-            .flatten()
-            .map(get_record_batch_memory_size)
-            .sum()
+    fn total_size(&self) -> usize {
+        self.total_runs_size + self.replaying_run_size
+    }
+
+    fn stage_batch(&mut self, batch: RecordBatch, partition_id: usize) -> usize {
+        let batch_size = get_record_batch_memory_size(&batch);
+        self.runs.entry(partition_id).or_default().push(batch);
+        *self.run_sizes.entry(partition_id).or_default() += batch_size;
+        self.total_runs_size += batch_size;
+        batch_size
+    }
+
+    fn begin_replay(&mut self) {
+        self.is_draining = true;
+    }
+
+    fn finish_replaying_run(&mut self) {
+        self.replaying_run_size = 0;
+    }
+
+    fn next_partition_id(&self) -> Option<usize> {
+        self.runs.first_key_value().map(|(partition_id, _)| *partition_id)
+    }
+
+    fn take_run(&mut self, partition_id: usize) -> Result<Vec<RecordBatch>> {
+        let runs = self.runs.remove(&partition_id).ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "Missing buffered runs for final partitioned input partition {partition_id}"
+            ))
+        })?;
+        let run_size = self.run_sizes.remove(&partition_id).ok_or_else(|| {
+            DataFusionError::Internal(format!(
+                "Missing buffered run size for final partitioned input partition {partition_id}"
+            ))
+        })?;
+        self.total_runs_size -= run_size;
+        self.replaying_run_size = run_size;
+        Ok(runs)
     }
 }
 
@@ -793,11 +831,14 @@ impl Stream for GroupedHashAggregateStream {
                                                 "cannot switch final partitioned aggregation to buffered runs after groups have already been accumulated"
                                             )));
                                         }
-                                        self.stage_final_partitioned_batch(
-                                            batch,
-                                            partition_id,
-                                        );
-                                        self.update_memory_reservation()?;
+                                        let batch_memory = self
+                                            .stage_final_partitioned_batch(
+                                                batch,
+                                                partition_id,
+                                            );
+                                        self.reserve_staged_final_partitioned_batch(
+                                            batch_memory,
+                                        )?;
                                         timer.done();
                                         break 'reading_input;
                                     }
@@ -1118,10 +1159,42 @@ impl GroupedHashAggregateStream {
         })
     }
 
-    fn stage_final_partitioned_batch(&mut self, batch: RecordBatch, partition_id: usize) {
-        if let Some(state) = self.radix_state.as_mut() {
-            state.runs.entry(partition_id).or_default().push(batch);
+    fn stage_final_partitioned_batch(
+        &mut self,
+        batch: RecordBatch,
+        partition_id: usize,
+    ) -> usize {
+        self.radix_state
+            .as_mut()
+            .map(|state| state.stage_batch(batch, partition_id))
+            .unwrap_or(0)
+    }
+
+    fn reserve_staged_final_partitioned_batch(
+        &mut self,
+        batch_memory: usize,
+    ) -> Result<()> {
+        if batch_memory == 0 {
+            return Ok(());
         }
+
+        let total_buffered_size = self
+            .radix_state
+            .as_ref()
+            .map(RadixPartitionState::total_size)
+            .unwrap_or(0);
+
+        // The first staged batch also needs to account for the stream's fixed-size
+        // aggregation structures, so fall back to the full recomputation once.
+        if total_buffered_size == batch_memory {
+            return self.update_memory_reservation();
+        }
+
+        self.reservation.try_grow(batch_memory)?;
+        self.spill_state
+            .peak_mem_used
+            .set_max(self.reservation.size());
+        Ok(())
     }
 
     /// Advance the replay of buffered `FinalPartitioned` input runs.
@@ -1166,6 +1239,11 @@ impl GroupedHashAggregateStream {
             // Emit all groups currently stored in the hash map.
             pending_output = self.emit(EmitTo::All, false)?;
 
+            // The replayed partition's buffered batches have been fully consumed.
+            if let Some(state) = self.radix_state.as_mut() {
+                state.finish_replaying_run();
+            }
+
             // Important: the next buffered partition must start from a clean hash map,
             // otherwise groups from different upstream partitions would be mixed.
             self.clear_all();
@@ -1173,17 +1251,13 @@ impl GroupedHashAggregateStream {
             // First transition from "buffering" to "replaying".
             // Mark the replay loop as active so future calls know they need to flush
             // the current partition before advancing.
-            state.is_draining = true;
+            state.begin_replay();
         }
 
-        // Pick the smallest remaining buffered partition id.
-        // We use `BTreeMap`, so `first_key_value()` gives a deterministic order.
-        let next_partition_id = self.radix_state.as_ref().and_then(|state| {
-            state
-                .runs
-                .first_key_value()
-                .map(|(partition_id, _)| *partition_id)
-        });
+        let next_partition_id = self
+            .radix_state
+            .as_ref()
+            .and_then(RadixPartitionState::next_partition_id);
 
         if let Some(partition_id) = next_partition_id {
             // Take ownership of all buffered batches for the chosen input partition.
@@ -1191,12 +1265,13 @@ impl GroupedHashAggregateStream {
             let runs = self
                 .radix_state
                 .as_mut()
-                .and_then(|state| state.runs.remove(&partition_id))
                 .ok_or_else(|| {
-                    DataFusionError::Internal(format!(
-                        "Missing buffered runs for final partitioned input partition {partition_id}"
-                    ))
-                })?;
+                    DataFusionError::Internal(
+                        "missing radix state while replaying final partitioned runs"
+                            .to_string(),
+                    )
+                })?
+                .take_run(partition_id)?;
 
             // All batches in one run should have the same schema. Reuse the first batch's
             // schema to build a lightweight `BucketStream` over these in-memory batches.
@@ -1310,7 +1385,7 @@ impl GroupedHashAggregateStream {
         let radix_runs_size = self
             .radix_state
             .as_ref()
-            .map(RadixPartitionState::runs_size)
+            .map(RadixPartitionState::total_size)
             .unwrap_or(0);
         let new_size = groups_and_acc_size + sort_headroom + radix_runs_size;
         let reservation_result = self.reservation.try_resize(new_size);
