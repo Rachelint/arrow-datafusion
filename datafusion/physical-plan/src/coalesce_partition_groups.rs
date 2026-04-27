@@ -93,8 +93,8 @@ fn run_input_with_partition_id(
         };
 
         while let Some(item) = stream.next().await {
-            let item =
-                item.and_then(|batch| tag_batch_with_input_partition_id(batch, partition));
+            let item = item
+                .and_then(|batch| tag_batch_with_input_partition_id(batch, partition));
             let is_err = item.is_err();
 
             if output.send(item).await.is_err() {
@@ -126,7 +126,7 @@ impl CoalescePartitionGroupsExec {
             "CoalescePartitionGroupsExec requires at least one input partition"
         );
         assert_or_internal_err!(
-            input_partitions % output_partitions == 0,
+            input_partitions.is_multiple_of(output_partitions),
             "CoalescePartitionGroupsExec requires input partitions ({input_partitions}) to be divisible by output partitions ({output_partitions})"
         );
 
@@ -218,7 +218,11 @@ impl DisplayAs for CoalescePartitionGroupsExec {
                 self.output_partitions,
             ),
             DisplayFormatType::TreeRender => {
-                writeln!(f, "partition_count(in->out)={input_partitions} -> {}", self.output_partitions)?;
+                writeln!(
+                    f,
+                    "partition_count(in->out)={input_partitions} -> {}",
+                    self.output_partitions
+                )?;
                 write!(f, "group_size={group_size}")
             }
         }
@@ -244,7 +248,10 @@ impl ExecutionPlan for CoalescePartitionGroupsExec {
 
     fn apply_expressions(
         &self,
-        _f: &mut dyn FnMut(&dyn PhysicalExpr) -> Result<datafusion_common::tree_node::TreeNodeRecursion>,
+        _f: &mut dyn FnMut(
+            &dyn PhysicalExpr,
+        )
+            -> Result<datafusion_common::tree_node::TreeNodeRecursion>,
     ) -> Result<datafusion_common::tree_node::TreeNodeRecursion> {
         Ok(datafusion_common::tree_node::TreeNodeRecursion::Continue)
     }
@@ -280,7 +287,9 @@ impl ExecutionPlan for CoalescePartitionGroupsExec {
                 let stream = self.input.execute(partition, context)?;
                 let schema = self.schema();
                 let tagged_stream = stream.map(move |item| {
-                    item.and_then(|batch| tag_batch_with_input_partition_id(batch, partition))
+                    item.and_then(|batch| {
+                        tag_batch_with_input_partition_id(batch, partition)
+                    })
                 });
                 Ok(Box::pin(RecordBatchStreamAdapter::new(
                     schema,
@@ -370,11 +379,19 @@ mod tests {
         let input = test::scan_partitioned(8);
         let coalesce = CoalescePartitionGroupsExec::try_new(input, 2)?;
 
-        assert_eq!(coalesce.properties().output_partitioning().partition_count(), 2);
+        assert_eq!(
+            coalesce
+                .properties()
+                .output_partitioning()
+                .partition_count(),
+            2
+        );
         assert_eq!(coalesce.group_size(), 4);
 
         for partition in 0..2 {
-            let batches = common::collect(coalesce.execute(partition, Arc::clone(&task_ctx))?).await?;
+            let batches =
+                common::collect(coalesce.execute(partition, Arc::clone(&task_ctx))?)
+                    .await?;
             assert_eq!(batches.len(), 4);
             let row_count: usize = batches.iter().map(|batch| batch.num_rows()).sum();
             assert_eq!(row_count, 400);
@@ -387,7 +404,8 @@ mod tests {
     async fn preserves_hash_partitioning_metadata() -> Result<()> {
         let input = test::scan_partitioned(1);
         let schema = input.schema();
-        let hash_expr = Arc::new(Column::new_with_schema("i", &schema)?) as Arc<dyn PhysicalExpr>;
+        let hash_expr =
+            Arc::new(Column::new_with_schema("i", &schema)?) as Arc<dyn PhysicalExpr>;
         let repartition = Arc::new(RepartitionExec::try_new(
             input,
             Partitioning::Hash(vec![Arc::clone(&hash_expr)], 8),
@@ -411,7 +429,8 @@ mod tests {
         let input = test::scan_partitioned(8);
         let coalesce = CoalescePartitionGroupsExec::try_new(input, 2)?;
 
-        let batches = common::collect(coalesce.execute(0, Arc::clone(&task_ctx))?).await?;
+        let batches =
+            common::collect(coalesce.execute(0, Arc::clone(&task_ctx))?).await?;
         let partition_ids = batches
             .iter()
             .map(|batch| {

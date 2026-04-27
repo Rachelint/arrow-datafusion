@@ -28,8 +28,8 @@ use std::sync::Arc;
 use crate::optimizer::PhysicalOptimizerRule;
 use crate::output_requirements::OutputRequirementExec;
 use crate::utils::{
-    add_sort_above_with_check, is_coalesce_partition_groups,
-    is_coalesce_partitions, is_repartition, is_sort_preserving_merge,
+    add_sort_above_with_check, is_coalesce_partition_groups, is_coalesce_partitions,
+    is_repartition, is_sort_preserving_merge,
 };
 
 use arrow::compute::SortOptions;
@@ -990,16 +990,18 @@ fn add_hash_with_partition_groups_on_top(
     // Step 3: We do need a new hash shuffle, but instead of shuffling directly to
     // `output_partitions`, we intentionally oversubscribe the hash buckets by `fanout`.
     // This creates more upstream parallelism before we coalesce back down.
-    let repartition_partitions = output_partitions.checked_mul(fanout).ok_or_else(|| {
-        datafusion_common::DataFusionError::Internal(
-            "aggregate hash repartition fanout overflow".to_string(),
-        )
-    })?;
+    let repartition_partitions =
+        output_partitions.checked_mul(fanout).ok_or_else(|| {
+            datafusion_common::DataFusionError::Internal(
+                "aggregate hash repartition fanout overflow".to_string(),
+            )
+        })?;
     let repartition = Arc::new(RepartitionExec::try_new(
         Arc::clone(&input.plan),
         Partitioning::Hash(hash_exprs, repartition_partitions),
     )?) as Arc<dyn ExecutionPlan>;
-    let repartition_context = DistributionContext::new(repartition.clone(), true, vec![input]);
+    let repartition_context =
+        DistributionContext::new(repartition.clone(), true, vec![input]);
 
     // Step 4: Fold the `output_partitions * fanout` hash buckets back into
     // `output_partitions` groups. The resulting node is still allowed to advertise

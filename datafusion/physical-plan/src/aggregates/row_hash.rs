@@ -17,6 +17,7 @@
 
 //! Hash aggregation
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::vec;
@@ -29,6 +30,7 @@ use crate::aggregates::{
     AggregateInputMode, AggregateMode, AggregateOutputMode, PhysicalGroupBy,
     create_schema, evaluate_group_by, evaluate_many, evaluate_optional,
 };
+use crate::coalesce_partition_groups::INPUT_STREAM_ID_METADATA_KEY;
 use crate::metrics::{BaselineMetrics, MetricBuilder, MetricCategory, RecordOutput};
 use crate::sorts::streaming_merge::{SortedSpillFile, StreamingMergeBuilder};
 use crate::spill::spill_manager::{GetSlicedSize, SpillManager};
@@ -71,6 +73,50 @@ pub(crate) enum ExecutionState {
     SkippingAggregation,
     /// All input has been consumed and all groups have been emitted
     Done,
+}
+
+struct BucketStream {
+    schema: SchemaRef,
+    iter: vec::IntoIter<RecordBatch>,
+}
+
+impl Stream for BucketStream {
+    type Item = Result<RecordBatch>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.get_mut().iter.next().map(Ok))
+    }
+}
+
+impl RecordBatchStream for BucketStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+struct RadixPartitionState {
+    runs: BTreeMap<usize, Vec<RecordBatch>>,
+    is_draining: bool,
+}
+
+impl RadixPartitionState {
+    fn new() -> Self {
+        Self {
+            runs: BTreeMap::new(),
+            is_draining: false,
+        }
+    }
+
+    fn runs_size(&self) -> usize {
+        self.runs
+            .values()
+            .flatten()
+            .map(get_record_batch_memory_size)
+            .sum()
+    }
 }
 
 /// This encapsulates the spilling state
@@ -433,6 +479,10 @@ pub(crate) struct GroupedHashAggregateStream {
     /// The spill state object
     spill_state: SpillState,
 
+    /// Buffered runs for final partitioned inputs that can be replayed one
+    /// upstream partition at a time to reuse the same hash map.
+    radix_state: Option<RadixPartitionState>,
+
     /// Optional probe for skipping data aggregation, if supported by
     /// current stream.
     skip_aggregation_probe: Option<SkipAggregationProbe>,
@@ -618,6 +668,10 @@ impl GroupedHashAggregateStream {
             spill_manager,
         };
 
+        let radix_state = (agg.mode == AggregateMode::FinalPartitioned
+            && matches!(&group_ordering, GroupOrdering::None))
+        .then(RadixPartitionState::new);
+
         // Skip aggregation is supported if:
         // - aggregation mode is Partial
         // - input is not ordered by GROUP BY expressions,
@@ -678,6 +732,7 @@ impl GroupedHashAggregateStream {
             group_ordering,
             input_done: false,
             spill_state,
+            radix_state,
             group_values_soft_limit: agg.limit_options().map(|config| config.limit()),
             skip_aggregation_probe,
             reduction_factor,
@@ -728,6 +783,35 @@ impl Stream for GroupedHashAggregateStream {
                                     self.reduction_factor.as_ref()
                             {
                                 reduction_factor.add_total(input_rows);
+                            }
+
+                            if self.should_buffer_final_partitioned_input() {
+                                match self.final_partitioned_input_partition_id(&batch)? {
+                                    Some(partition_id) => {
+                                        if !self.group_values.is_empty() {
+                                            return Poll::Ready(Some(internal_err!(
+                                                "cannot switch final partitioned aggregation to buffered runs after groups have already been accumulated"
+                                            )));
+                                        }
+                                        self.stage_final_partitioned_batch(
+                                            batch,
+                                            partition_id,
+                                        );
+                                        self.update_memory_reservation()?;
+                                        timer.done();
+                                        break 'reading_input;
+                                    }
+                                    None if self
+                                        .radix_state
+                                        .as_ref()
+                                        .is_some_and(|state| !state.runs.is_empty()) =>
+                                    {
+                                        return Poll::Ready(Some(internal_err!(
+                                            "missing input partition metadata for final partitioned aggregation after buffered runs have started"
+                                        )));
+                                    }
+                                    None => {}
+                                }
                             }
 
                             // Do the grouping.
@@ -1009,6 +1093,155 @@ impl GroupedHashAggregateStream {
         Ok(())
     }
 
+    fn should_buffer_final_partitioned_input(&self) -> bool {
+        self.mode == AggregateMode::FinalPartitioned
+            && self
+                .radix_state
+                .as_ref()
+                .is_some_and(|state| !state.is_draining)
+    }
+
+    fn final_partitioned_input_partition_id(
+        &self,
+        batch: &RecordBatch,
+    ) -> Result<Option<usize>> {
+        let schema = batch.schema();
+        let Some(partition_id) = schema.metadata().get(INPUT_STREAM_ID_METADATA_KEY)
+        else {
+            return Ok(None);
+        };
+
+        partition_id.parse::<usize>().map(Some).map_err(|e| {
+            DataFusionError::Internal(format!(
+                "Invalid input partition metadata `{INPUT_STREAM_ID_METADATA_KEY}` value `{partition_id}`: {e}"
+            ))
+        })
+    }
+
+    fn stage_final_partitioned_batch(&mut self, batch: RecordBatch, partition_id: usize) {
+        if let Some(state) = self.radix_state.as_mut() {
+            state.runs.entry(partition_id).or_default().push(batch);
+        }
+    }
+
+    /// Advance the replay of buffered `FinalPartitioned` input runs.
+    ///
+    /// Background:
+    /// - While reading the original input stream, batches are first buffered into
+    ///   `radix_state.runs`, keyed by the upstream input partition id.
+    /// - We then replay one buffered partition at a time through the same
+    ///   `GroupedHashAggregateStream`, so the hash map / accumulators can be reused
+    ///   across partitions instead of allocating a fresh aggregation stream each time.
+    ///
+    /// This function is called after the current input source is exhausted.
+    /// It has two modes:
+    /// 1. First entry into replay mode:
+    ///    - No partition has been replayed yet.
+    ///    - We only switch `self.input` to the first buffered run.
+    /// 2. Subsequent entries:
+    ///    - The current buffered partition has finished replaying.
+    ///    - We must first emit that partition's aggregation result, clear the hash map,
+    ///      and then switch `self.input` to the next buffered partition.
+    ///
+    /// If there are no buffered partitions left, we finalize the stream.
+    fn advance_final_partitioned_runs(&mut self) -> Result<()> {
+        // `is_draining = false` means this is the first time we are entering the
+        // replay path: we have buffered runs, but have not started replaying any
+        // partition yet.
+        //
+        // `is_draining = true` means we have already replayed at least one buffered
+        // partition. Therefore, before loading the next one, we must flush the
+        // current hash map contents as that partition's output.
+        let is_draining = self
+            .radix_state
+            .as_ref()
+            .is_some_and(|state| state.is_draining);
+
+        // If `emit(...)` produces an output batch, we cannot immediately continue
+        // reading the next partition in the same poll cycle. We stash that batch in
+        // `pending_output` and switch the execution state to `ProducingOutput` below.
+        let mut pending_output = None;
+        if is_draining {
+            // We have just finished replaying one buffered partition.
+            // Emit all groups currently stored in the hash map.
+            pending_output = self.emit(EmitTo::All, false)?;
+
+            // Important: the next buffered partition must start from a clean hash map,
+            // otherwise groups from different upstream partitions would be mixed.
+            self.clear_all();
+        } else if let Some(state) = self.radix_state.as_mut() {
+            // First transition from "buffering" to "replaying".
+            // Mark the replay loop as active so future calls know they need to flush
+            // the current partition before advancing.
+            state.is_draining = true;
+        }
+
+        // Pick the smallest remaining buffered partition id.
+        // We use `BTreeMap`, so `first_key_value()` gives a deterministic order.
+        let next_partition_id = self.radix_state.as_ref().and_then(|state| {
+            state
+                .runs
+                .first_key_value()
+                .map(|(partition_id, _)| *partition_id)
+        });
+
+        if let Some(partition_id) = next_partition_id {
+            // Take ownership of all buffered batches for the chosen input partition.
+            // Removing it from `runs` ensures this partition will be replayed exactly once.
+            let runs = self
+                .radix_state
+                .as_mut()
+                .and_then(|state| state.runs.remove(&partition_id))
+                .ok_or_else(|| {
+                    DataFusionError::Internal(format!(
+                        "Missing buffered runs for final partitioned input partition {partition_id}"
+                    ))
+                })?;
+
+            // All batches in one run should have the same schema. Reuse the first batch's
+            // schema to build a lightweight `BucketStream` over these in-memory batches.
+            let schema = runs.first().map(|batch| batch.schema()).ok_or_else(|| {
+                DataFusionError::Internal(format!(
+                    "Buffered runs for final partitioned input partition {partition_id} were unexpectedly empty"
+                ))
+            })?;
+
+            // Replace the current input with a synthetic stream backed by the buffered
+            // batches for this one input partition. From the rest of the aggregation
+            // logic's perspective, this looks just like a normal input stream.
+            self.input = Box::pin(BucketStream {
+                schema,
+                iter: runs.into_iter(),
+            });
+
+            // The new synthetic input has not been consumed yet.
+            self.input_done = false;
+
+            // If we emitted a batch above, return that batch first.
+            // Otherwise, immediately continue reading from the newly installed
+            // `BucketStream` on the next poll.
+            self.exec_state = pending_output.map_or(
+                ExecutionState::ReadingInput,
+                ExecutionState::ProducingOutput,
+            );
+        } else {
+            // No buffered partitions remain.
+            // This means the replay phase is complete and the stream can finish.
+            self.input_done = true;
+            self.group_ordering.input_done();
+
+            // Same rule as above: if we just emitted a final batch, surface it first;
+            // otherwise the stream is fully done.
+            self.exec_state = pending_output
+                .map_or(ExecutionState::Done, ExecutionState::ProducingOutput);
+        }
+
+        // Recompute memory usage after removing one run from the buffer and/or
+        // clearing the active aggregation state.
+        self.update_memory_reservation()?;
+        Ok(())
+    }
+
     /// Attempts to update the memory reservation. If that fails due to a
     /// [DataFusionError::ResourcesExhausted] error, an attempt will be made to resolve
     /// the out-of-memory condition based on the [out-of-memory handling mode](OutOfMemoryMode).
@@ -1074,7 +1307,12 @@ impl GroupedHashAggregateStream {
                 0
             };
 
-        let new_size = groups_and_acc_size + sort_headroom;
+        let radix_runs_size = self
+            .radix_state
+            .as_ref()
+            .map(RadixPartitionState::runs_size)
+            .unwrap_or(0);
+        let new_size = groups_and_acc_size + sort_headroom + radix_runs_size;
         let reservation_result = self.reservation.try_resize(new_size);
 
         if reservation_result.is_ok() {
@@ -1217,6 +1455,14 @@ impl GroupedHashAggregateStream {
     /// This method is called both when the original input stream and,
     /// in case of disk spilling, the SPM stream have been drained.
     fn set_input_done_and_produce_output(&mut self) -> Result<()> {
+        if self
+            .radix_state
+            .as_ref()
+            .is_some_and(|state| state.is_draining || !state.runs.is_empty())
+        {
+            return self.advance_final_partitioned_runs();
+        }
+
         self.input_done = true;
         self.group_ordering.input_done();
         let elapsed_compute = self.baseline_metrics.elapsed_compute().clone();
@@ -1359,12 +1605,110 @@ mod tests {
     use crate::InputOrderMode;
     use crate::execution_plan::ExecutionPlan;
     use crate::test::TestMemoryExec;
-    use arrow::array::{Int32Array, Int64Array};
+    use arrow::array::{Int32Array, Int64Array, RecordBatch};
     use arrow::datatypes::{DataType, Field, Schema};
     use datafusion_execution::runtime_env::RuntimeEnvBuilder;
     use datafusion_functions_aggregate::count::count_udaf;
+    use datafusion_functions_aggregate::sum::sum_udaf;
     use datafusion_physical_expr::aggregate::AggregateExprBuilder;
     use datafusion_physical_expr::expressions::col;
+
+    fn tag_final_partitioned_batch(
+        batch: RecordBatch,
+        partition_id: usize,
+    ) -> Result<RecordBatch> {
+        let mut metadata = batch.schema().metadata().clone();
+        metadata.insert(
+            INPUT_STREAM_ID_METADATA_KEY.to_string(),
+            partition_id.to_string(),
+        );
+        let schema = Arc::new(Schema::new_with_metadata(
+            batch.schema().fields().clone(),
+            metadata,
+        ));
+        Ok(batch.with_schema(schema)?)
+    }
+
+    #[tokio::test]
+    async fn test_final_partitioned_reuses_hashmap_per_input_partition() -> Result<()> {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("group_col", DataType::Int32, false),
+            Field::new("value", DataType::Int64, false),
+        ]));
+
+        let make_batch = |groups: Vec<i32>, values: Vec<i64>| {
+            RecordBatch::try_new(
+                Arc::clone(&schema),
+                vec![
+                    Arc::new(Int32Array::from(groups)) as ArrayRef,
+                    Arc::new(Int64Array::from(values)) as ArrayRef,
+                ],
+            )
+        };
+
+        let input_batches = vec![
+            tag_final_partitioned_batch(make_batch(vec![1, 2], vec![2, 5])?, 0)?,
+            tag_final_partitioned_batch(make_batch(vec![4], vec![11])?, 2)?,
+            tag_final_partitioned_batch(make_batch(vec![1, 3], vec![3, 7])?, 0)?,
+            tag_final_partitioned_batch(make_batch(vec![4, 5], vec![1, 9])?, 2)?,
+        ];
+
+        let input =
+            TestMemoryExec::try_new_exec(&[input_batches], Arc::clone(&schema), None)?;
+        let input =
+            Arc::new(TestMemoryExec::update_cache(&input)) as Arc<dyn ExecutionPlan>;
+
+        let group_by = PhysicalGroupBy::new_single(vec![(
+            col("group_col", &schema)?,
+            "group_col".to_string(),
+        )]);
+        let aggr_expr = vec![Arc::new(
+            AggregateExprBuilder::new(sum_udaf(), vec![col("value", &schema)?])
+                .schema(Arc::clone(&schema))
+                .alias("SUM(value)")
+                .build()?,
+        )];
+        let aggregate_exec = AggregateExec::try_new(
+            AggregateMode::FinalPartitioned,
+            group_by,
+            aggr_expr,
+            vec![None],
+            input,
+            Arc::clone(&schema),
+        )?;
+
+        let task_ctx = Arc::new(TaskContext::default());
+        let mut stream = GroupedHashAggregateStream::new(&aggregate_exec, &task_ctx, 0)?;
+        let mut actual = Vec::new();
+        while let Some(batch) = stream.next().await {
+            let batch = batch?;
+            let groups = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("group column should be Int32");
+            let sums = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("sum column should be Int64");
+            for row in 0..batch.num_rows() {
+                actual.push((groups.value(row), sums.value(row)));
+            }
+        }
+        actual.sort_unstable();
+
+        assert_eq!(actual, vec![(1, 5), (2, 5), (3, 7), (4, 12), (5, 9)]);
+        assert!(stream.group_values.is_empty());
+        assert!(
+            stream
+                .radix_state
+                .as_ref()
+                .is_some_and(|state| state.runs.is_empty() && state.is_draining)
+        );
+
+        Ok(())
+    }
 
     #[tokio::test]
     async fn test_double_emission_race_condition_bug() -> Result<()> {
