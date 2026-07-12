@@ -396,7 +396,8 @@ where
     pub fn into_state(mut self) -> ArrayRef {
         // Flush any remaining in-progress buffer
         if !self.in_progress.is_empty() {
-            let flushed = std::mem::replace(&mut self.in_progress, Vec::with_capacity(BYTE_VIEW_MAX_BLOCK_SIZE));
+            let flushed_len = self.in_progress.len();
+            let flushed = std::mem::replace(&mut self.in_progress, Vec::with_capacity(flushed_len));
             self.completed.push(Buffer::from_vec(flushed));
         }
 
@@ -421,7 +422,8 @@ where
     /// Converts this map into an array and clears the map for reuse.
     pub fn take_state(&mut self) -> ArrayRef {
         if !self.in_progress.is_empty() {
-            let flushed = std::mem::replace(&mut self.in_progress, Vec::with_capacity(BYTE_VIEW_MAX_BLOCK_SIZE));
+            let flushed_len = self.in_progress.len();
+            let flushed = std::mem::replace(&mut self.in_progress, Vec::with_capacity(flushed_len));
             self.completed.push(Buffer::from_vec(flushed));
         }
 
